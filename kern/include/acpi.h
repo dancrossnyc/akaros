@@ -1,4 +1,4 @@
-/* 
+/*
  * This file is part of the UCB release of Plan 9. It is subject to the license
  * terms in the LICENSE file found in the top-level directory of this
  * distribution and at http://akaros.cs.berkeley.edu/files/Plan9License. No
@@ -7,11 +7,40 @@
  * in the LICENSE file.
  */
 
+/* -----------------------------------------------------------------------------
+ * ACPI is a table of tables. The tables define a hierarchy.
+ *
+ * Each table that we care about has a header, and the header has a
+ * length that includes the the length of all its subtables. So, even
+ * if you can't completely parse a table, you can find the next table.
+ *
+ * The process of parsing is to find the RSDP, and then for each subtable
+ * see what type it is and parse it. The process is recursive except for
+ * a few issues: The RSDP signature and header differs from the header of
+ * its subtables; their headers differ from the signatures of the tables
+ * they contain. As you walk down the tree, you need different parsers.
+ *
+ * So, in this case, it's something like this:
+ *
+ * RSDP is the root. It has a standard header and size. You map that
+ * memory.  You find the first header, get its type and size, and
+ * parse as much of it as you can. Parsing will involve either a
+ * function or case statement for each element type. DMARs are complex
+ * and need functions; APICs are simple and we can get by with case
+ * statements.
+ *
+ * In the end we present a directory tree for #apic that looks, in this example:
+ * #acpi/DMAR/DRHD/0/{pretty,raw}
+ *
+ * 'cat pretty' will return JSON-encoded data described the element.
+ * 'cat raw' gets you the raw bytes.
+ */
+
 #pragma once
 
 enum {
 
-	Sdthdrsz = 36,				/* size of SDT header */
+	Sdthdrsz = 36,			/* size of SDT header */
 
 	/* ACPI regions. Gas ids */
 	Rsysmem = 0,
@@ -25,7 +54,7 @@ enum {
 	Rfixedhw = 0x7f,
 
 	/* ACPI PM1 control */
-	Pm1SciEn = 0x1,	/* Generate SCI and not SMI */
+	Pm1SciEn = 0x1,			/* Generate SCI and not SMI */
 
 	/* ACPI tbdf as encoded in acpi region base addresses */
 	Rpciregshift = 0,
@@ -38,61 +67,108 @@ enum {
 	Rpcibusmask = 0xFFFF,
 
 	/* Apic structure types */
-	ASlapic = 0,	/* processor local apic */
-	ASioapic,	/* I/O apic */
-	ASintovr,	/* Interrupt source override */
-	ASnmi,	/* NMI source */
-	ASlnmi,	/* local apic nmi */
-	ASladdr,	/* local apic address override */
-	ASiosapic,	/* I/O sapic */
-	ASlsapic,	/* local sapic */
-	ASintsrc,	/* platform interrupt sources */
-	ASlx2apic,	/* local x2 apic */
-	ASlx2nmi,	/* local x2 apic NMI */
+	ASlapic = 0,		/* processor local apic */
+	ASioapic,			/* I/O apic */
+	ASintovr,			/* Interrupt source override */
+	ASnmi,				/* NMI source */
+	ASlnmi,				/* local apic nmi */
+	ASladdr,			/* local apic address override */
+	ASiosapic,			/* I/O sapic */
+	ASlsapic,			/* local sapic */
+	ASintsrc,			/* platform interrupt sources */
+	ASlx2apic,			/* local x2 apic */
+	ASlx2nmi,			/* local x2 apic NMI */
 
 	/* Apic flags */
-	AFbus = 0,	/* polarity/trigger like in ISA */
-	AFhigh = 1,	/* active high */
-	AFlow = 3,	/* active low */
-	AFpmask = 3,	/* polarity bits */
+	AFbus = 0,			/* polarity/trigger like in ISA */
+	AFhigh = 1,			/* active high */
+	AFlow = 3,			/* active low */
+	AFpmask = 3,		/* polarity bits */
 	AFedge = 1 << 2,	/* edge triggered */
 	AFlevel = 3 << 2,	/* level triggered */
 	AFtmask = 3 << 2,	/* trigger bits */
 
+	/* Table types. */
+	RSDP = 0,
+	SDTH,
+	RSDT,
+	FADT,
+	FACS,
+	DSDT,
+	SSDT,
+	MADT,
+	SBST,
+	XSDT,
+	ECDT,
+	SLIT,
+	SRAT,
+	CPEP,
+	MSCT,
+	RASF,
+	MPST,
+	PMTT,
+	BGRT,
+	FPDT,
+	GTDT,
+	NACPITBLS,			/* Number of ACPI tables */
+
 	/* SRAT types */
-	SRlapic = 0,	/* Local apic/sapic affinity */
-	SRmem,	/* Memory affinity */
-	SRlx2apic,	/* x2 apic affinity */
+	SRlapic = 0,		/* Local apic/sapic affinity */
+	SRmem,				/* Memory affinity */
+	SRlx2apic,			/* x2 apic affinity */
+
+	/* DMAR types */
+	DRHD = 0,
+	RMRR,
+	ATSR,
+	RHSA,
+	ANDD,
+
+	/* Atable constants */
+	SIGSZ		= 4+1,	/* Size of the signature (including NUL) */
+	OEMIDSZ		= 6+1,	/* Size of the OEM ID (including NUL) */
+	OEMTBLIDSZ	= 8+1,	/* Size of the OEM Table ID (including NUL) */
 
 	/* Arg for _PIC */
-	Ppic = 0,	/* PIC interrupt model */
-	Papic,	/* APIC interrupt model */
-	Psapic,	/* SAPIC interrupt model */
+	Ppic = 0,			/* PIC interrupt model */
+	Papic,				/* APIC interrupt model */
+	Psapic,				/* SAPIC interrupt model */
 
-	CMregion = 0,	/* regio name spc base len accsz */
-	CMgpe,	/* gpe name id */
-
-	Qdir = 0,
-	Qctl,
-	Qtbl,
-	Qio,
-	Qpretty,
-	Qioapic,
-	Qapic,
-	Qraw,
+	CMregion = 0,		/* regio name spc base len accsz */
+	CMgpe,				/* gpe name id */
 };
 
 /*
  * ACPI table (sw)
+ *
+ * This Atable struct corresponds to an interpretation of the standard header
+ * for all table types we support. It has a pointer to the converted data, i.e.
+ * the structs created by functions like acpimadt and so on. Note: althouh the
+ * various things in this are a superset of many ACPI table names (DRHD, DRHD
+ * scopes, etc). The raw data follows this header.
+ *
+ * Child entries in the table are kept in an array of pointers. Each entry has
+ * a pointer to it's logically "next" sibling, thus forming a linked list. But
+ * these lists are purely for convenience and all point to nodes within the
+ * same array.
  */
 struct Atable {
-	struct Atable *next;		/* next table in list */
-	int is64;					/* uses 64bits */
-	char sig[5];				/* signature */
-	char oemid[7];				/* oem id str. */
-	char oemtblid[9];			/* oem tbl. id str. */
-	uint8_t *tbl;				/* pointer to table in memory */
-	long dlen;					/* size of data in table, after Stdhdr */
+	int type;					/* this table's type */
+	char sig[SIGSZ];			/* signature */
+	char oemid[OEMIDSZ];		/* oem id str. */
+	char oemtblid[OEMTBLIDSZ];	/* oem table id str. */
+	struct qid qid;				/* qid corresponding to this table in the NS. */
+	void *tbl;					/* pointer to the converted table, e.g. madt. */
+
+	struct Atable *parent;		/* Parent pointer */
+	struct Atable *next;		/* sibling tables resulting from a scan. */
+	size_t siblingno;			/* index of this node in the sibling table. */
+	struct Atable **children;	/* children of this node (an array). */
+	size_t nchildren;			/* count of this node's children */
+
+	size_t size;				/* Total size of raw table */
+	size_t dlen;				/* size of data in table; e.g. after header */
+	uint8_t raw[];				/* Raw data. */
 };
 
 struct Gpe {
@@ -107,19 +183,19 @@ struct Gpe {
 
 struct Parse {
 	char *sig;
-	struct Atable *(*f) (uint8_t * unused_uint8_p_t, int);	/* return NULL to keep vmap */
+	void (*f) (struct Atable *, uint8_t *, int);
 };
 
 struct Regio {
 	void *arg;
-	 uint8_t(*get8) (uintptr_t, void *);
-	void (*set8) (uintptr_t, uint8_t unused_int, void *);
-	 uint16_t(*get16) (uintptr_t, void *);
-	void (*set16) (uintptr_t, uint16_t unused_int, void *);
-	 uint32_t(*get32) (uintptr_t, void *);
-	void (*set32) (uintptr_t, uint32_t, void *);
-	 uint64_t(*get64) (uintptr_t, void *);
-	void (*set64) (uintptr_t, uint64_t unused_int, void *);
+	uint8_t (*get8)(uintptr_t, void *);
+	void (*set8)(uintptr_t, uint8_t unused_int, void *);
+	uint16_t (*get16)(uintptr_t, void *);
+	void (*set16)(uintptr_t, uint16_t unused_int, void *);
+	uint32_t (*get32)(uintptr_t, void *);
+	void (*set32)(uintptr_t, uint32_t, void *);
+	uint64_t (*get64)(uintptr_t, void *);
+	void (*set64)(uintptr_t, uint64_t unused_int, void *);
 };
 
 struct Reg {
@@ -132,7 +208,7 @@ struct Reg {
 	int accsz;					/* access size */
 };
 
-/* Generic address structure. 
+/* Generic address structure.
  */
 struct Gas {
 	uint8_t spc;				/* address space id */
@@ -383,6 +459,40 @@ struct Xsdt {
 	uint8_t *p;
 };
 
+/* DMAR.
+ */
+/* The device scope is basic tbdf as uint32_t. There is a special value that means
+ * "everything" and if we see that we set "all" in the Drhd.
+ */
+struct DeviceScope {
+	uint32_t tbdf;
+};
+
+/* this is just hateful, and maybe there's a better way.
+ * I can't think of anything that's not a total ugly clusterfuck.
+ */
+struct Dtab {
+	int type;
+	union {
+		struct Drhd {
+			int nscope;
+			int segment;
+			uintptr_t base;
+			uintptr_t all; // this drhd scope is for everything.
+			struct DeviceScope scopes[];
+		}drhd;
+	};
+};
+
+struct Dmar {
+	int haw;
+	/* no, sorry, if your stupid firmware disables x2apic
+	 * mode, you should not be here. We ignore that bit.
+	 */
+	int intr_remap;
+	int numentry;
+	struct Dtab dtab[];
+};
 
 extern uintptr_t acpimblocksize(uintptr_t, int *);
 

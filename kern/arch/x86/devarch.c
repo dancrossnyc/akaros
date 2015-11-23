@@ -1,4 +1,4 @@
-/* 
+/*
  * This file is part of the UCB release of Plan 9. It is subject to the license
  * terms in the LICENSE file found in the top-level directory of this
  * distribution and at http://akaros.cs.berkeley.edu/files/Plan9License. No
@@ -65,6 +65,9 @@ enum {
 	Qrealmem,
 	Qmsr,
 	Qperf,
+	Qapic,
+	Qioapic,
+	Qbase,
 
 	Qmax,
 };
@@ -84,6 +87,9 @@ static struct dirtab archdir[Qmax] = {
 	{"realmem", {Qrealmem, 0}, 0, 0444},
 	{"msr", {Qmsr, 0}, 0, 0666},
 	{"perf", {Qperf, 0}, 0, 0666},
+	{"apic", {Qapic, 0}, 0, 0444},
+	{"ioapic", {Qioapic, 0}, 0, 0444},
+	{"realmodemem", {Qrealmem, 0}, 0, 0664},
 };
 /* White list entries needs to be ordered by start address, and never overlap.
  */

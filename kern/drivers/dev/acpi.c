@@ -1,4 +1,4 @@
-/* 
+/*
  * This file is part of the UCB release of Plan 9. It is subject to the license
  * terms in the LICENSE file found in the top-level directory of this
  * distribution and at http://akaros.cs.berkeley.edu/files/Plan9License. No
@@ -20,6 +20,7 @@
 #include <pmap.h>
 #include <smp.h>
 #include <ip.h>
+#include <ns.h>
 #include <acpi.h>
 
 #include "../timers/hpet.h"
@@ -28,6 +29,36 @@
 #include <arch/pci.h>
 #endif
 
+/* -----------------------------------------------------------------------------
+ * Basic ACPI device.
+ *
+ * The qid.Path will be made unique by incrementing lastPath. lastPath starts
+ * at 1024, just for fun, and so we have lots of room for other things.
+ *
+ * Version, which is 32 bits, is used to store the ACPI ID, which is either 32,
+ * 16, or 8 bits.
+ *
+ * Qtbl will return a pointer to the Atable, which includes the signature, OEM
+ * data, and so on.
+ *
+ * Raw, at any level, dumps the raw table at that level, which by the ACPI
+ * flattened tree layout will include all descendents.
+ *
+ * Qpretty, at any level, will print the pretty form for that level and all
+ * descendants.
+ */
+enum {
+	Qroot = 0,
+
+	// versions, used as types. Paths won't do.
+	Qdir = 0,
+	Qtbl,
+	Qpretty,
+	Qraw,
+
+};
+
+static int lastPath = 1024;
 struct dev acpidevtab;
 
 static char *devname(void)
@@ -39,63 +70,29 @@ static char *devname(void)
  * ACPI 4.0 Support.
  * Still WIP.
  *
- * This driver locates tables and parses only the FADT
- * and the XSDT. All other tables are mapped and kept there
- * for the user-level interpreter.
+ * This driver locates tables and parses only a small subset
+ * of tables. All other tables are mapped and kept for the user-level
+ * interpreter.
  */
-
-static struct Atable *acpifadt(uint8_t *, int);
-static struct Atable *acpitable(uint8_t *, int);
-static struct Atable *acpimadt(uint8_t *, int);
-static struct Atable *acpimsct(uint8_t *, int);
-static struct Atable *acpisrat(uint8_t *, int);
-static struct Atable *acpislit(uint8_t *, int);
-
 static struct cmdtab ctls[] = {
 	{CMregion, "region", 6},
 	{CMgpe, "gpe", 3},
 };
 
 static struct dirtab acpidir[] = {
-	{".", {Qdir, 0, QTDIR}, 0, DMDIR | 0555},
-	{"acpictl", {Qctl}, 0, 0666},
-	{"acpitbl", {Qtbl}, 0, 0444},
-	{"acpiregio", {Qio}, 0, 0666},
-	{"acpipretty", {Qpretty}, 0, 0444},
-	{"ioapic", {Qioapic}, 0, 0444},
-	{"apic", {Qapic}, 0, 0444},
-	{"raw", {Qraw}, 0, 0444},
-};
-
-/*
- * The DSDT is always given to the user interpreter.
- * Tables listed here are also loaded from the XSDT:
- * MSCT, MADT, and FADT are processed by us, because they are
- * required to do early initialization before we have user processes.
- * Other tables are given to the user level interpreter for
- * execution.
- *
- * These historically returned a value to tell acpi whether or not it was okay
- * to unmap the table.  (return 0 means there was no table, meaning it was okay
- * to unmap).  We just use the kernbase mapping, so it's irrelevant. */
-static struct Parse ptables[] = {
-	{"FACP", acpifadt},
-	{"APIC", acpimadt,},
-	{"SRAT", acpisrat,},
-	{"SLIT", acpislit,},
-	{"MSCT", acpimsct,},
-	{"SSDT", acpitable,},
-	{"HPET", acpihpet,},
+	{".", {Qroot, 0, QTDIR}, 0, DMDIR | 0555},
 };
 
 static struct Facs *facs;		/* Firmware ACPI control structure */
-static struct Fadt fadt;		/* Fixed ACPI description. To reach ACPI registers */
+static struct Fadt fadt;		/* Fixed ACPI description to reach ACPI regs */
+static struct Atable *root;
 static struct Xsdt *xsdt;		/* XSDT table */
 static struct Atable *tfirst;	/* loaded DSDT/SSDT/... tables */
 static struct Atable *tlast;	/* pointer to last table */
 struct Madt *apics;				/* APIC info */
-struct Srat *srat;				/* System resource affinity, used by physalloc */
-static struct Slit *slit;		/* System locality information table used by the scheduler */
+struct Srat *srat;				/* System resource affinity used by physalloc */
+struct Dmar *dmar;
+static struct Slit *slit;		/* Sys locality info table used by scheduler */
 static struct Msct *msct;		/* Maximum system characteristics table */
 static struct Reg *reg;			/* region used for I/O */
 static struct Gpe *gpes;		/* General purpose events */
@@ -130,6 +127,10 @@ static int acpiregid(char *s)
 	return -1;
 }
 
+/*
+ * TODO(rminnich): Fix these if we're ever on a different-endian machine.
+ * They are specific to little-endian processors and are not portable.
+ */
 static uint8_t mget8(uintptr_t p, void *unused)
 {
 	uint8_t *cp = (uint8_t *) p;
@@ -208,8 +209,10 @@ static void ioset32(uintptr_t p, uint32_t v, void *unused)
 	outl(p, v);
 }
 
-/* TODO: these cfgs are hacky.	maybe all the struct Reg should have struct
- * pci_device or something? */
+/*
+ * TODO(rminnich): these cfgs are hacky. Maybe all the struct Reg should have
+ * struct pci_device or something?
+ */
 static uint8_t cfgget8(uintptr_t p, void *r)
 {
 	struct Reg *ro = r;
@@ -377,31 +380,28 @@ static long regio(struct Reg *r, void *p, uint32_t len, uintptr_t off, int iswr)
 	return len;
 }
 
-struct Atable *new_acpi_table(uint8_t * p)
+struct Atable *new_acpi_table(uint8_t *p)
 {
 	struct Atable *t;
 	struct Sdthdr *h;
+	int dlen;
 
-	t = kzmalloc(sizeof(struct Atable), 0);
+	h = (struct Sdthdr *)p;
+	dlen = l32get(h->length);
+
+	t = kzmalloc(sizeof(struct Atable) + dlen, KMALLOC_WAIT);
 	if (t == NULL)
 		panic("no memory for more aml tables");
-	t->tbl = p;
-	h = (struct Sdthdr *)t->tbl;
+	memcpy(t->raw, p, dlen);
+	h = (struct Sdthdr *)t->raw;
 	t->is64 = h->rev >= 2;
 	t->dlen = l32get(h->length) - Sdthdrsz;
-	memmove(t->sig, h->sig, sizeof(h->sig));
+	memmove(t->sig, h->sig, sizeof(t->sig));
 	t->sig[sizeof(t->sig) - 1] = 0;
-	memmove(t->oemid, h->oemid, sizeof(h->oemid));
+	memmove(t->oemid, h->oemid, sizeof(t->oemid));
 	t->oemtblid[sizeof(t->oemtblid) - 1] = 0;
-	memmove(t->oemtblid, h->oemtblid, sizeof(h->oemtblid));
+	memmove(t->oemtblid, h->oemtblid, sizeof(t->oemtblid));
 	t->oemtblid[sizeof(t->oemtblid) - 1] = 0;
-	t->next = NULL;
-	if (tfirst == NULL)
-		tfirst = tlast = t;
-	else {
-		tlast->next = t;
-		tlast = t;
-	}
 	return t;
 }
 
@@ -561,15 +561,15 @@ static char *dumpfadt(char *start, char *end, struct Fadt *fp)
 	return start;
 }
 
-static struct Atable *acpifadt(uint8_t * p, int len)
+static void acpifadt(struct Atable *a, uint8_t * p, int len)
 {
 	struct Fadt *fp;
 
 	if (len < 116) {
 		printk("ACPI: unusually short FADT, aborting!\n");
-		return 0;
 	}
-	fp = &fadt;
+	/* for now, keep the globals. We'll get rid of them later. */
+	fp = a->tbl = &fadt;
 	fp->facs = l32get(p + 36);
 	fp->dsdt = l32get(p + 40);
 	fp->pmprofile = p[45];
@@ -607,9 +607,12 @@ static struct Atable *acpifadt(uint8_t * p, int len)
 	fp->iapcbootarch = l16get(p + 109);
 	fp->flags = l32get(p + 112);
 
-	/* qemu gives us a 116 byte fadt, though i haven't seen any HW do that. */
+	/*
+	 * qemu gives us a 116 byte fadt, though i haven't seen any HW do that.
+	 * The right way to do this is to realloc the table and fake it out.
+	 */
 	if (len < 244)
-		return 0;
+		return;
 
 	gasget(&fp->resetreg, p + 116);
 	fp->resetval = p[128];
@@ -634,7 +637,7 @@ static struct Atable *acpifadt(uint8_t * p, int len)
 	else
 		loaddsdt(fp->dsdt);
 
-	return NULL;	/* can be unmapped once parsed */
+	return;
 }
 
 static char *dumpmsct(char *start, char *end, struct Msct *msct)
@@ -656,13 +659,13 @@ static char *dumpmsct(char *start, char *end, struct Msct *msct)
  * XXX: should perhaps update our idea of available memory.
  * Else we should remove this code.
  */
-static struct Atable *acpimsct(uint8_t * p, int len)
+static void acpimsct(struct Atable *a, uint8_t * p, int len)
 {
 	uint8_t *pe;
 	struct Mdom **stl, *st;
 	int off;
 
-	msct = kzmalloc(sizeof(struct Msct), 0);
+	msct = a->tbl = kzmalloc(sizeof(struct Msct), 0);
 	msct->ndoms = l32get(p + 40) + 1;
 	msct->nclkdoms = l32get(p + 44) + 1;
 	msct->maxpa = l64get(p + 48);
@@ -680,12 +683,41 @@ static struct Atable *acpimsct(uint8_t * p, int len)
 		*stl = st;
 		stl = &st->next;
 	}
-	return NULL;	/* can be unmapped once parsed */
+}
+
+static char *dmartype[] = {"DRHD", "RMRR", "ATSR", "RHSA", "ANDD", };
+
+/* TODO(rminnich): only handles on IOMMU for now. */
+static char *dumpdmar(char *start, char *end, struct Dmar *dt)
+{
+	if (dmar == NULL)
+		return start;
+	start = seprintf(start, end, "acpi: DMAR@%p:\n", dt);
+	start = seprintf(start, end,
+			 "\tdmar: intr_remap %d haw %d entries %d\n",
+			 dmar->intr_remap, dmar->haw, dt->numentry);
+	for(int i = 0; i < dt->numentry; i++) {
+		struct Dtab *dtab = &dt->dtab[i];
+		int t = dtab->type;
+		start = seprintf(start, end, "\t%s: ", dmartype[t]);
+		// TODO: function pointers in an array? probably. */
+		switch(t) {
+		case DRHD:
+			start = seprintf(start, end, "%s 0x%02x 0x%016x\n",
+							 dtab->drhd.all & 1 ? "INCLUDE_PCI_ALL" : "Scoped",
+							 dtab->drhd.segment, dtab->drhd.base);
+			break;
+		default:
+			start = seprintf(start, end, "Unsupported: type %t\n", t);
+			break;
+		}
+	}
+	return start;
 }
 
 static char *dumpsrat(char *start, char *end, struct Srat *st)
 {
-	start = seprintf(start, end, "acpi: START@%p:\n", st);
+	start = seprintf(start, end, "acpi: SRAT@%p:\n", st);
 	for (; st != NULL; st = st->next)
 		switch (st->type) {
 			case SRlapic:
@@ -714,7 +746,7 @@ static char *dumpsrat(char *start, char *end, struct Srat *st)
 	return start;
 }
 
-static struct Atable *acpisrat(uint8_t * p, int len)
+static void acpisrat(struct Atable *a, uint8_t * p, int len)
 {
 
 	struct Srat **stl, *st;
@@ -722,11 +754,11 @@ static struct Atable *acpisrat(uint8_t * p, int len)
 	int stlen, flags;
 
 	if (srat != NULL) {
-		printd("acpi: two SRATs?\n");
-		return NULL;
+		panic("acpi: two SRATs?\n");
+		return;
 	}
 
-	stl = &srat;
+	a->tbl = stl = &srat;
 	pe = p + len;
 	for (p += 48; p < pe; p += stlen) {
 		st = kzmalloc(sizeof(struct Srat), 1);
@@ -776,7 +808,6 @@ static struct Atable *acpisrat(uint8_t * p, int len)
 			stl = &st->next;
 		}
 	}
-	return NULL;	/* can be unmapped once parsed */
 }
 
 static char *dumpslit(char *start, char *end, struct Slit *sl)
@@ -804,7 +835,7 @@ static int cmpslitent(void *v1, void *v2)
 	return se1->dist - se2->dist;
 }
 
-static struct Atable *acpislit(uint8_t * p, int len)
+static void acpislit(struct Atable *a, uint8_t * p, int len)
 {
 
 	uint8_t *pe;
@@ -812,7 +843,7 @@ static struct Atable *acpislit(uint8_t * p, int len)
 	struct SlEntry *se;
 
 	pe = p + len;
-	slit = kzmalloc(sizeof(*slit), 0);
+	a->tbl = slit = kzmalloc(sizeof(*slit), 0);
 	slit->rowlen = l64get(p + 36);
 	slit->e = kzmalloc(slit->rowlen * sizeof(struct SlEntry *), 0);
 	for (i = 0; i < slit->rowlen; i++)
@@ -831,7 +862,6 @@ static struct Atable *acpislit(uint8_t * p, int len)
 	for (i = 0; i < slit->rowlen; i++)
 		qsort(slit->e[i], slit->rowlen, sizeof(slit->e[0][0]), cmpslitent);
 #endif
-	return NULL;	/* can be unmapped once parsed */
 }
 
 uintptr_t acpimblocksize(uintptr_t addr, int *dom)
@@ -954,14 +984,14 @@ static char *dumpmadt(char *start, char *end, struct Madt *apics)
 	return start;
 }
 
-static struct Atable *acpimadt(uint8_t * p, int len)
+static void acpimadt(struct Atable *a, uint8_t * p, int len)
 {
 
 	uint8_t *pe;
 	struct Apicst *st, *l, **stl;
 	int stlen, id;
 
-	apics = kzmalloc(sizeof(struct Madt), 1);
+	a->tbl = apics = kzmalloc(sizeof(struct Madt), 1);
 	apics->lapicpa = l32get(p + 36);
 	apics->pcat = l32get(p + 40);
 	apics->st = NULL;
@@ -1069,18 +1099,109 @@ static struct Atable *acpimadt(uint8_t * p, int len)
 			stl = &st->next;
 		}
 	}
-	return NULL;	/* can be unmapped once parsed */
+}
+
+/*
+ * one function for each type of scope.
+ */
+static void dscopes(uint8_t *p, struct Dtab *dtab, int tablen)
+{
+	int i;
+	int curoffset = 0;
+	dtab->drhd.nscope = 0;
+	printk("dscopes@%p, %d scopes: ", &p[curoffset], tablen - curoffset);
+	hexdump(&p[curoffset], tablen - curoffset);
+	for(i = curoffset; i < tablen; i += 4){
+		/* this is PAINFUL. We read the tbdf, look it up, read
+		 * the next scope, look that up w.r.t the one we have,
+		 * blah blah. Who designs this stuff? */
+	}
+
+}
+
+static int dtab(uint8_t *p, struct Dtab *dtab)
+{
+	int len;
+	dtab->type = l16get(p);
+	p += 2;
+	len = l16get(p);
+	p += 2;
+	switch(dtab->type) {
+	case DRHD:
+		dtab->drhd.all = p[0] & 1;
+		p++;
+		p++; /* reserved */
+		dtab->drhd.segment = l16get(p);
+		p += 2;
+		dtab->drhd.base = l64get(p);
+		p += 8;
+		/* NOTE: if all is set, there should be no scopes of type
+		 * This being ACPI, where vendors randomly copy tables
+		 * from one system to another, and creating breakage,
+		 * anything is possible. But we'll warn them.
+		 */
+		dscopes(p, dtab, len);
+		break;
+	default:
+		break;
+	}
+
+	/* N.B. We always skip over any unprocessed bits. */
+	return len;
+}
+
+static void acpidmar(struct Atable *a, uint8_t * p, int len)
+{
+	int i;
+	int baselen = len > 38 ? 38 : len;
+	int nentry, off;
+
+	/* count the entries */
+	for(nentry = 0, off = 48; off < len; nentry++) {
+		int dslen = p[off+2]|(p[off+3]<<8);
+		printk("@%d it is %p 0x%x/0x%x\n",
+			   nentry, p, p[off]|(p[off+1]<<8), dslen);
+		off = off + dslen;
+	}
+	printk("DMAR: %d entries\n", nentry);
+	a->tbl = dmar = kzmalloc(sizeof(*dmar) + nentry * sizeof(dmar->dtab[0]), 1);
+	dmar->numentry = nentry;
+	/* the table can be only partly filled. Don't we all love ACPI?
+	 * No, we f@@@ing hate it.
+	 */
+	switch(baselen) {
+	default:
+			break;
+
+	case 38:
+		if (p[37] & 1)
+			dmar->intr_remap = 1;
+	case 37:
+		dmar->haw = p[36] + 1;
+	}
+	/* now we get to walk all the 2 byte elements, ain't it
+	 * grand.
+	 */
+	for(off = 48, i = 0; i < nentry; i++) {
+		int dslen = p[2+off]|(p[off+3]<<8);
+		printk("@%d it is %p 0x%x/0x%x\n",
+			   i, &p[off], p[off]|(p[off+1]<<8), dslen);
+		dtab(&p[off], &dmar->dtab[i]);
+		off += dslen;
+	}
 }
 
 /*
  * Map the table and keep it there.
  */
-static struct Atable *acpitable(uint8_t * p, int len)
+static void acpitable(struct Atable *a, uint8_t * p, int len)
 {
+	/* we found it. It's too small. now what? */
+	/* The previous code never even tested this case. The hell with it. */
 	if (len < Sdthdrsz) {
-		return NULL;
+		return;
 	}
-	return new_acpi_table(p);
+	a->tbl = new_acpi_table(p);
 }
 
 static char *dumptable(char *start, char *end, char *sig, uint8_t * p, int l)
@@ -1124,42 +1245,6 @@ static char *seprinttable(char *s, char *e, struct Atable *t)
 	return seprintf(s, e, "\n\n");
 }
 
-/*
- * process xsdt table and load tables with sig, or all if NULL.
- * (XXX: should be able to search for sig, oemid, oemtblid)
- */
-static int acpixsdtload(char *sig)
-{
-	int i, l, t, found;
-	uintptr_t dhpa;
-	uint8_t *sdt;
-	char tsig[5];
-	char table[128];
-
-	found = 0;
-	for (i = 0; i < xsdt->len; i += xsdt->asize) {
-		if (xsdt->asize == 8)
-			dhpa = l64get(xsdt->p + i);
-		else
-			dhpa = l32get(xsdt->p + i);
-		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
-			continue;
-		memmove(tsig, sdt, 4);
-		tsig[4] = 0;
-		if (sig == NULL || strcmp(sig, tsig) == 0) {
-			printd("acpi: %s addr %#p\n", tsig, sdt);
-			for (t = 0; t < ARRAY_SIZE(ptables); t++)
-				if (strcmp(tsig, ptables[t].sig) == 0) {
-					//dumptable(table, &table[127], tsig, sdt, l);
-					ptables[t].f(sdt, l);
-					found = 1;
-					break;
-				}
-		}
-	}
-	return found;
-}
-
 static void *rsdsearch(char *signature)
 {
 	uintptr_t p;
@@ -1173,19 +1258,103 @@ static void *rsdsearch(char *signature)
 	return sigscan(KADDR(0xE0000), 0x20000, signature);
 }
 
+/*
+ * Note: some of this comment is from the unfinished user interpreter.
+ *
+ * The DSDT is always given to the user interpreter.
+ * Tables listed here are also loaded from the XSDT:
+ * MSCT, MADT, and FADT are processed by us, because they are
+ * required to do early initialization before we have user processes.
+ * Other tables are given to the user level interpreter for
+ * execution.
+ *
+ * These historically returned a value to tell acpi whether or not it was okay
+ * to unmap the table.  (return 0 means there was no table, meaning it was okay
+ * to unmap).  We just use the kernbase mapping, so it's irrelevant.
+ *
+ * N.B. The intel source code defines the constants for ACPI in a
+ * non-endian-independent manner. Rather than bring in the huge wad o' code
+ * that represents, we just the names.
+ */
+static struct Parse ptables[] = {
+	{"FACP", acpifadt,},
+	{"APIC", acpimadt,},
+	{"DMAR", acpidmar,},
+	{"SRAT", acpisrat,},
+	{"SLIT", acpislit,},
+	{"MSCT", acpimsct,},
+	{"SSDT", acpitable,},
+//	{"HPET", acpihpet,},
+};
+
+/*
+ * process xsdt table and load tables with sig, or all if NULL.
+ * (XXX: should be able to search for sig, oemid, oemtblid)
+ */
+static int acpixsdtload(char *sig)
+{
+	struct Atable *a;
+	ERRSTACK(1);
+	int i, l, t, found;
+	uintptr_t dhpa;
+	uint8_t *sdt;
+	char table[128];
+	struct Atable *n;
+
+	if (waserror()) {
+		return 0;
+	}
+
+	/* oh and, of course, the xsdt format is like no other. So fake it. */
+	root = kzmalloc(sizeof(*root), KMALLOC_WAIT);
+	root->is64 = 1;
+	root->dotdot = root;
+	root->dlen = 0;
+	mkqid(&root->qid, Qroot, 0, Qdir);
+
+	strlcpy(root->sig, ".", sizeof(root->sig));
+	found = 0;
+	for (i = 0, root->next = NULL; i < xsdt->len; i += xsdt->asize) {
+		if (xsdt->asize == 8)
+			dhpa = l64get(xsdt->p + i);
+		else
+			dhpa = l32get(xsdt->p + i);
+		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
+			continue;
+		a = new_acpi_table(sdt);
+		memmove(a->raw, sdt, l);
+		// set up the "converted" structure with the name.
+		// TODO: fill in more bits.
+		memmove(a->sig, sdt, 4);
+		a->sig[4] = 0;
+		if (sig == NULL || strcmp(sig, a->sig) == 0) {
+			printd("acpi: %s addr %#p\n", tsig, sdt);
+			for (t = 0; t < ARRAY_SIZE(ptables); t++)
+				if (strcmp(a->sig, ptables[t].sig) == 0) {
+					//dumptable(table, &table[127], tsig, sdt, l);
+					ptables[t].f(a, sdt, l);
+					a->next = root->next;
+					root->next = a;
+					found = 1;
+					break;
+				}
+		}
+	}
+	return found;
+}
+
 static void acpirsdptr(void)
 {
 	struct Rsdp *rsd;
 	int asize;
 	uintptr_t sdtpa;
 
+	static_assert(sizeof(struct Sdthdr) == 36);
 	if ((rsd = rsdsearch("RSD PTR ")) == NULL) {
 		printk("NO RSDP\n");
 		return;
 	}
 
-
-	assert(sizeof(struct Sdthdr) == 36);
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
 	       rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
 	       *(uint32_t *)rsd->raddr, *(uint32_t *)rsd->length,
@@ -1216,7 +1385,7 @@ static void acpirsdptr(void)
 	 */
 	xsdt = kzmalloc(sizeof(struct Xsdt), 0);
 	if (xsdt == NULL) {
-		printk("acpi: malloc failed\n");
+		panic("acpi: malloc failed\n");
 		return;
 	}
 	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
@@ -1237,29 +1406,41 @@ static void acpirsdptr(void)
 	printd("acpi: XSDT %#p\n", xsdt);
 	acpixsdtload(NULL);
 	/* xsdt is kept and not unmapped */
-
 }
 
-static int
-acpigen(struct chan *c, char *unused_char_p_t, struct dirtab *tab, int ntab,
-		int i, struct dir *dp)
+static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
+				   int i, struct dir *dp)
 {
 	struct qid qid;
+	int el;
+	uint8_t *cp;
+	struct Atable *a = c->aux;
+	int ix;
+
+	printk("name %s i %d\n", name, i);
 
 	if (i == DEVDOTDOT) {
-		mkqid(&qid, Qdir, 0, QTDIR);
-		devdir(c, qid, devname(), 0, eve, 0555, dp);
+		devdir(c, a->dotdot->qid, devname(), 0, eve, 0555, dp);
 		return 1;
 	}
-	i++;	/* skip first element for . itself */
-	if (tab == 0 || i >= ntab) {
-		return -1;
+
+	// First is always '.'
+	if (i == 0) {
+		devdir(c, a->qid, ".", 0, eve, 0555, dp);
+		c->aux = a;
+		return 1;
 	}
-	tab += i;
-	qid = tab->qid;
-	qid.path &= ~Qdir;
-	qid.vers = 0;
-	devdir(c, qid, tab->name, tab->length, eve, tab->perm, dp);
+
+	for(ix = 1; (ix < i) && a; ix++) {
+		printk("a %p a->next %p\n", a, a->next);
+		a = a->next;
+	}
+	printk("ix is %d and a is %p\n", ix, a);
+	if (ix < i || !a)
+		return -1;
+	devdir(c, a->qid, a->sig, 0, eve, 0555, dp);
+	c->aux = a;
+	printk("REturning %d\n", 1);
 	return 1;
 }
 
@@ -1285,12 +1466,12 @@ static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g)
 			start = seprintf(start, end, "[pci ");
 			start =
 				seprintf(start, end, "dev %#p ",
-						 (uint32_t) (g->addr >> 32) & 0xFFFF);
+						 (uint32_t)(g->addr >> 32) & 0xFFFF);
 			start =
 				seprintf(start, end, "fn %#p ",
-						 (uint32_t) (g->addr & 0xFFFF0000) >> 16);
+						 (uint32_t)(g->addr & 0xFFFF0000) >> 16);
 			start =
-				seprintf(start, end, "adr %#p ", (uint32_t) (g->addr & 0xFFFF));
+				seprintf(start, end, "adr %#p ", (uint32_t)(g->addr & 0xFFFF));
 			break;
 		case Rfixedhw:
 			start = seprintf(start, end, "[hw ");
@@ -1444,6 +1625,7 @@ static void acpiintr(Ureg *, void *)
 	setpm1sts(sts);
 }
 #endif
+
 static void initgpes(void)
 {
 	int i, n0, n1;
@@ -1490,6 +1672,7 @@ int acpiinit(void)
 			return -1;
 		}
 	}
+
 	printk("ACPI initialized\n");
 	return 0;
 }
@@ -1497,7 +1680,7 @@ int acpiinit(void)
 static struct chan *acpiattach(char *spec)
 {
 	int i;
-
+	struct chan *c;
 	/*
 	 * This was written for the stock kernel.
 	 * This code must use 64 registers to be acpi ready in nix.
@@ -1520,8 +1703,10 @@ static struct chan *acpiattach(char *spec)
 	acpiioalloc(fadt.gpe1blk, fadt.gpe1blklen);
 
 	initgpes();
-
-	/*
+#ifdef CONFIG_WE_ARE_NOT_WORTHY
+	/* this is frightening. SMI: just say no. Although we will almost
+	 * certainly find that we have no choice.
+	 *
 	 * This starts ACPI, which may require we handle
 	 * power mgmt events ourselves. Use with care.
 	 */
@@ -1531,15 +1716,18 @@ static struct chan *acpiattach(char *spec)
 			break;
 	if (i == 10)
 		error(EFAIL, "acpi: failed to enable\n");
-//  if(fadt.sciint != 0)
-//      intrenable(fadt.sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
-	return devattach(devname(), spec);
+	if(fadt.sciint != 0)
+		intrenable(fadt.sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
+#endif
+	c = devattach(devname(), spec);
+	c->aux = root;
+	return c;
 }
 
 static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 								int nname)
 {
-	return devwalk(c, nc, name, nname, acpidir, ARRAY_SIZE(acpidir), acpigen);
+	return devwalk(c, nc, name, nname, 0, 0, acpigen);
 }
 
 static int acpistat(struct chan *c, uint8_t * dp, int n)
@@ -1559,6 +1747,8 @@ static void acpiclose(struct chan *unused)
 static char *ttext;
 static int tlen;
 
+// Get the table from the qid.
+// Read that one table using the pointers.
 static long acpiread(struct chan *c, void *a, long n, int64_t off)
 {
 	long q;
@@ -1571,51 +1761,45 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 	}
 	if (ttext == NULL)
 		error(ENOMEM, "acpiread: no memory");
-	q = c->qid.path;
+	q = c->qid.vers;
 	switch (q) {
-		case Qdir:
-			return devdirread(c, a, n, acpidir, ARRAY_SIZE(acpidir), acpigen);
-		case Qraw:
-			return readmem(off, a, n, ttext, tlen);
-			break;
-		case Qtbl:
-			s = ttext;
-			e = ttext + tlen;
-			strlcpy(s, "no tables\n", tlen);
-			for (t = tfirst; t != NULL; t = t->next) {
+	case Qdir:
+		printk("acpiread: 0x%x\n", c->qid.path);
+		return devdirread(c, a, n, 0, 0, acpigen);
+	case Qraw:
+		return readmem(off, a, n, ttext, tlen);
+		break;
+	case Qtbl:
+		s = ttext;
+		e = ttext + tlen;
+		strlcpy(s, "no tables\n", tlen);
+		for (t = tfirst; t != NULL; t = t->next) {
+			ns = seprinttable(s, e, t);
+			while (ns == e - 1) {
+				ntext = krealloc(ttext, tlen * 2, 0);
+				if (ntext == NULL)
+					panic("acpi: no memory\n");
+				s = ntext + (ttext - s);
+				ttext = ntext;
+				tlen *= 2;
+				e = ttext + tlen;
 				ns = seprinttable(s, e, t);
-				while (ns == e - 1) {
-					ntext = krealloc(ttext, tlen * 2, 0);
-					if (ntext == NULL)
-						panic("acpi: no memory\n");
-					s = ntext + (ttext - s);
-					ttext = ntext;
-					tlen *= 2;
-					e = ttext + tlen;
-					ns = seprinttable(s, e, t);
-				}
-				s = ns;
 			}
-			return readstr(off, a, n, ttext);
-		case Qpretty:
-			s = ttext;
-			e = ttext + tlen;
-			s = dumpfadt(s, e, &fadt);
-			s = dumpmadt(s, e, apics);
-			s = dumpslit(s, e, slit);
-			s = dumpsrat(s, e, srat);
-			dumpmsct(s, e, msct);
-			return readstr(off, a, n, ttext);
-		case Qioapic:
-			s = ioapicdump(ttext, ttext + tlen);
-			return readstr(off, a, n, ttext);
-		case Qapic:
-			s = apicdump(ttext, ttext + tlen);
-			return readstr(off, a, n, ttext);
-		case Qio:
-			if (reg == NULL)
-				error(EFAIL, "region not configured");
-			return regio(reg, a, n, off, 0);
+			s = ns;
+		}
+		return readstr(off, a, n, ttext);
+	case Qpretty:
+		s = ttext;
+		e = ttext + tlen;
+		s = dumpfadt(s, e, &fadt);
+		s = dumpmadt(s, e, apics);
+		s = dumpslit(s, e, slit);
+		s = dumpsrat(s, e, srat);
+		s = dumpdmar(s, e, dmar);
+		dumpmsct(s, e, msct);
+		return readstr(off, a, n, ttext);
+	default:
+		error(EINVAL, "WHAT? %d\n", q);
 	}
 	error(EPERM, ERROR_FIXME);
 	return -1;
@@ -1623,6 +1807,8 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 
 static long acpiwrite(struct chan *c, void *a, long n, int64_t off)
 {
+	error(EFAIL, "acpiwrite: not until we can figure out what it's for");
+#if 0
 	ERRSTACK(2);
 	struct cmdtab *ct;
 	struct cmdbuf *cb;
@@ -1695,6 +1881,30 @@ static long acpiwrite(struct chan *c, void *a, long n, int64_t off)
 	poperror();
 	kfree(cb);
 	return n;
+#endif
+}
+
+struct {
+	char *(*pretty)(char *start, char *end, void *);
+} acpisw[NACPITBLS] = {
+};
+
+static char *pretty(struct Atable *atbl, char *start, char *end, void *)
+{
+	int type;
+
+	type = atbl->type;
+	if (type < 0 || NACPITBLS < type)
+		return start;
+	if (acpisw[type].pretty == NULL)
+		return seprint(start, end, "\"\",\n");
+	return acpisw[type].pretty(atbl, start, end, NULL);
+}
+
+static char *raw(struct Atable *atbl, char *start, char *end, void *)
+{
+	size_t len = min(end - start, atbl->size);
+	memmove(start, atbl->
 }
 
 struct dev acpidevtab __devtab = {
