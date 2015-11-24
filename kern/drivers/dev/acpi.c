@@ -103,6 +103,12 @@ static char *regnames[] = {
 	"smb", "cmos", "pcibar",
 };
 
+static void strlmove(char *dst, const void *src, size_t n)
+{
+	memmove(dst, src, n - 1);
+	dst[n - 1] = '\0';
+}
+
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g);
 
 static char *acpiregstr(int id)
@@ -118,12 +124,9 @@ static char *acpiregstr(int id)
 
 static int acpiregid(char *s)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(regnames); i++)
-		if (strcmp(regnames[i], s) == 0) {
+	for (int i = 0; i < ARRAY_SIZE(regnames); i++)
+		if (strcmp(regnames[i], s) == 0)
 			return i;
-		}
 	return -1;
 }
 
@@ -394,29 +397,25 @@ struct Atable *new_acpi_table(uint8_t *p)
 		panic("no memory for more aml tables");
 	memcpy(t->raw, p, dlen);
 	h = (struct Sdthdr *)t->raw;
-	t->is64 = h->rev >= 2;
 	t->dlen = l32get(h->length) - Sdthdrsz;
-	memmove(t->sig, h->sig, sizeof(t->sig));
-	t->sig[sizeof(t->sig) - 1] = 0;
-	memmove(t->oemid, h->oemid, sizeof(t->oemid));
-	t->oemtblid[sizeof(t->oemtblid) - 1] = 0;
-	memmove(t->oemtblid, h->oemtblid, sizeof(t->oemtblid));
-	t->oemtblid[sizeof(t->oemtblid) - 1] = 0;
+	strlmove(t->sig, h->sig, sizeof(t->sig));
+	strlmove(t->oemid, h->oemid, sizeof(t->oemid));
+	strlmove(t->oemtblid, h->oemtblid, sizeof(t->oemtblid));
 	return t;
 }
 
-static void *sdtchecksum(void *addr, int len)
+/*
+ * Compute and return SDT checksum: '0' is a correct sum.
+ */
+static uint8_t sdtchecksum(void *addr, int len)
 {
 	uint8_t *p, sum;
 
 	sum = 0;
 	for (p = addr; len-- > 0; p++)
 		sum += *p;
-	if (sum == 0) {
-		return addr;
-	}
 
-	return NULL;
+	return sum;
 }
 
 static void *sdtmap(uintptr_t pa, int *n, int cksum)
@@ -441,7 +440,7 @@ static void *sdtmap(uintptr_t pa, int *n, int cksum)
 		printk("acpi: NULL vmap\n");
 		return NULL;
 	}
-	if (cksum != 0 && sdtchecksum(sdt, *n) == NULL) {
+	if (cksum != 0 && sdtchecksum(sdt, *n) != 0) {
 		printk("acpi: SDT: bad checksum\n");
 		return NULL;
 	}
@@ -1307,26 +1306,21 @@ static int acpixsdtload(char *sig)
 
 	/* oh and, of course, the xsdt format is like no other. So fake it. */
 	root = kzmalloc(sizeof(*root), KMALLOC_WAIT);
-	root->is64 = 1;
-	root->dotdot = root;
+	root->parent = root;
 	root->dlen = 0;
 	mkqid(&root->qid, Qroot, 0, Qdir);
 
 	strlcpy(root->sig, ".", sizeof(root->sig));
 	found = 0;
 	for (i = 0, root->next = NULL; i < xsdt->len; i += xsdt->asize) {
-		if (xsdt->asize == 8)
-			dhpa = l64get(xsdt->p + i);
-		else
-			dhpa = l32get(xsdt->p + i);
+		dhpa = l64get(xsdt->p + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
 		a = new_acpi_table(sdt);
 		memmove(a->raw, sdt, l);
 		// set up the "converted" structure with the name.
 		// TODO: fill in more bits.
-		memmove(a->sig, sdt, 4);
-		a->sig[4] = 0;
+		strlmove(a->sig, sdt, sizeof(a->sig));
 		if (sig == NULL || strcmp(sig, a->sig) == 0) {
 			printd("acpi: %s addr %#p\n", tsig, sdt);
 			for (t = 0; t < ARRAY_SIZE(ptables); t++)
@@ -1346,7 +1340,6 @@ static int acpixsdtload(char *sig)
 static void acpirsdptr(void)
 {
 	struct Rsdp *rsd;
-	int asize;
 	uintptr_t sdtpa;
 
 	static_assert(sizeof(struct Sdthdr) == 36);
@@ -1364,21 +1357,14 @@ static void acpirsdptr(void)
 		   rsd, l32get(rsd->raddr), l32get(rsd->length),
 		   l64get(rsd->xaddr), rsd->revision);
 
-	if (rsd->revision >= 2) {
-		if (sdtchecksum(rsd, 36) == NULL) {
-			printk("acpi: RSD: bad checksum\n");
-			return;
-		}
-		sdtpa = l64get(rsd->xaddr);
-		asize = 8;
-	} else {
-		if (sdtchecksum(rsd, 20) == NULL) {
-			printk("acpi: RSD: bad checksum\n");
-			return;
-		}
-		sdtpa = l32get(rsd->raddr);
-		asize = 4;
+    if (rsd->revision < 2)
+		panic("32 bit ACPI no longer supported");
+
+	if (sdtchecksum(rsd, 36) != 0) {
+		printk("acpi: RSD: bad checksum\n");
+		return;
 	}
+	sdtpa = l64get(rsd->xaddr);
 
 	/*
 	 * process the RSDT or XSDT table.
@@ -1402,7 +1388,7 @@ static void acpirsdptr(void)
 	}
 	xsdt->p += sizeof(struct Sdthdr);
 	xsdt->len -= sizeof(struct Sdthdr);
-	xsdt->asize = asize;
+	xsdt->asize = 8;
 	printd("acpi: XSDT %#p\n", xsdt);
 	acpixsdtload(NULL);
 	/* xsdt is kept and not unmapped */
@@ -1420,7 +1406,7 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 	printk("name %s i %d\n", name, i);
 
 	if (i == DEVDOTDOT) {
-		devdir(c, a->dotdot->qid, devname(), 0, eve, 0555, dp);
+		devdir(c, a->parent->qid, devname(), 0, eve, 0555, dp);
 		return 1;
 	}
 
@@ -1885,11 +1871,11 @@ static long acpiwrite(struct chan *c, void *a, long n, int64_t off)
 }
 
 struct {
-	char *(*pretty)(char *start, char *end, void *);
+	char *(*pretty)(struct Atable *atbl, char *start, char *end, void *arg);
 } acpisw[NACPITBLS] = {
 };
 
-static char *pretty(struct Atable *atbl, char *start, char *end, void *)
+static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 {
 	int type;
 
@@ -1897,14 +1883,15 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *)
 	if (type < 0 || NACPITBLS < type)
 		return start;
 	if (acpisw[type].pretty == NULL)
-		return seprint(start, end, "\"\",\n");
-	return acpisw[type].pretty(atbl, start, end, NULL);
+		return seprintf(start, end, "\"\",\n");
+	return acpisw[type].pretty(atbl, start, end, arg);
 }
 
-static char *raw(struct Atable *atbl, char *start, char *end, void *)
+static char *raw(struct Atable *atbl, char *start, char *end, void *unused_arg)
 {
-	size_t len = min(end - start, atbl->size);
-	memmove(start, atbl->
+	size_t len = MIN(end - start, atbl->size);
+	memmove(start, atbl->raw, len);
+	return start + len;
 }
 
 struct dev acpidevtab __devtab = {

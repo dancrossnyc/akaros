@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <kmalloc.h>
 #include <string.h>
+#include <ns.h>
 #include <acpi.h>
 #include <arch/arch.h>
 #include <arch/apic.h>
