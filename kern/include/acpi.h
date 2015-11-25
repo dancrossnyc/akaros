@@ -21,6 +21,12 @@
  * its subtables; their headers differ from the signatures of the tables
  * they contain. As you walk down the tree, you need different parsers.
  *
+ * The parser is recursive descent. Each parsing function takes a pointer
+ * to the parent of the node it is parsing and will attach itself to the parent
+ * via that pointer. Parsing functions are responsible for building the data
+ * structures that represent their node and recursive invocations of the parser
+ * for subtables.
+ *
  * So, in this case, it's something like this:
  *
  * RSDP is the root. It has a standard header and size. You map that
@@ -165,11 +171,11 @@ struct Atable {
 	struct qid qid;             /* qid corresponding to this table in the NS. */
 	int type;					/* this table's type */
 	void *tbl;					/* pointer to the converted table, e.g. madt. */
-	char *name;                 /* name of this table */
+	char name[16];				/* name of this table */
 
 	struct Atable *parent;		/* Parent pointer */
 	struct Atable *next;		/* sibling tables resulting from a scan. */
-	size_t sindex;	    		/* index of this node in the sibling table. */
+	size_t sindex;				/* index of this node in the sibling table. */
 	struct Atable **children;	/* children of this node (an array). */
 	size_t nchildren;			/* count of this node's children */
 

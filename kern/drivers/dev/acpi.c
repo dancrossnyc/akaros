@@ -114,22 +114,22 @@ struct Slice {
 
 void clear(struct Slice *slice)
 {
-	len = 0;
-	memset(tables, 0, sizeof(*tables) * size);
+	slice->len = 0;
+	memset(slice->ptrs, 0, sizeof(*slice->ptrs) * slice->size);
 }
 
-void append(struct Slice *slice, void *ptr)
+void append(struct Slice *s, void *p)
 {
-	if (slice->len == slice->size) {
+	if (s->len == s->size) {
 		void **ps;
-		slice->size *= 2;
-		if (slice->size == 0)
-			slice->size = 8;
-		ps = kreallocarray(slice->ptrs, slice->size, sizeof(void *));
-		assert(ps != NULL);		// XXX: Can never happen.
+		s->size *= 2;
+		if (s->size == 0)
+			s->size = 8;
+		ps = kreallocarray(s->ptrs, s->size, sizeof(void *), KMALLOC_WAIT);
+		assert(ps != NULL);		/* XXX: if size*sizeof(void*) overflows. */
 	}
-	slice->ptrs[slice->len] = ptr;
-	slice->len++;
+	s->ptrs[slice->len] = ptr;
+	s->len++;
 }
 
 size_t len(struct Slice *slice) { return slice->len; }
@@ -147,6 +147,10 @@ void *finalize(struct Slice *slice)
 	return ps;
 }
 
+/*
+ * This is like strncpy, but always NUL terminates and doesn't zero pad (one
+ * simply gets whatever was in src before).
+ */
 static void strlmove(char *dst, const void *src, size_t n)
 {
 	memmove(dst, src, n - 1);
@@ -1391,16 +1395,35 @@ static int acpixsdtload(char *sig)
 	return found;
 }
 
-static void acpirsdptr(void)
+static void parsersdptr(void)
 {
 	struct Rsdp *rsd;
+	int asize, cksum;
 	uintptr_t sdtpa;
 
 	static_assert(sizeof(struct Sdthdr) == 36);
+
+	/* Find the root pointer. */
 	if ((rsd = rsdsearch("RSD PTR ")) == NULL) {
 		printk("NO RSDP\n");
 		return;
 	}
+
+	/*
+	 * Handcraft the root of ACPI parse tree.
+	 */
+	root = kzmalloc(sizeof(struct Aslice), KMALLOC_WAIT);
+	mkqid(&root->qid, Qroot, 0, Qdir);
+	root->type = XSDT;
+	root->tbl = NULL;
+	root->name = "XSDT";
+	root->parent = root;
+	root->next = NULL;
+	root->sindex = 0;
+	root->type = 0;
+	root->children = NULL;
+	root->nchildren = 0;
+	root->size = 0;
 
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
 		   rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
@@ -1411,14 +1434,23 @@ static void acpirsdptr(void)
 		   rsd, l32get(rsd->raddr), l32get(rsd->length),
 		   l64get(rsd->xaddr), rsd->revision);
 
-	if (rsd->revision < 2)
-		panic("32 bit ACPI no longer supported");
-
-	if (sdtchecksum(rsd, 36) != 0) {
-		printk("acpi: RSD: bad checksum\n");
-		return;
+	if (rsd->revision >= 2) {
+		cksum = sdtchecksum(rsd, 36);
+		if (cksum != 0) {
+			printk("acpi: bad RSD checksum %d, 64 bit parser aborted\n", cksum);
+			return;
+		}
+		sdtpa = l64get(rsd->xaddr);
+		asize = 8;
+	} else {
+		cksum = sdtchecksum(rsd, 20);
+		if (cksum != 0) {
+			printk("acpi: bad RSD checksum %d, 32 bit parser aborted\n", cksum);
+			return;
+		}
+		sdtpa = l32get(rsd->raddr);
+		asize = 4;
 	}
-	sdtpa = l64get(rsd->xaddr);
 
 	/*
 	 * process the RSDT or XSDT table.
@@ -1442,7 +1474,7 @@ static void acpirsdptr(void)
 	}
 	xsdt->p += sizeof(struct Sdthdr);
 	xsdt->len -= sizeof(struct Sdthdr);
-	xsdt->asize = 8;
+	xsdt->asize = asize;
 	printd("acpi: XSDT %#p\n", xsdt);
 	acpixsdtload(NULL);
 	/* xsdt is kept and not unmapped */
@@ -1707,7 +1739,7 @@ int acpiinit(void)
 	/* this smicmd test implements 'run once' for now. */
 	if (fadt.smicmd == 0) {
 		//fmtinstall('G', Gfmt);
-		acpirsdptr();
+		parsersdptr();
 		if (fadt.smicmd == 0) {
 			return -1;
 		}
