@@ -10,6 +10,7 @@
 /* -----------------------------------------------------------------------------
  * ACPI is a table of tables. The tables define a hierarchy.
  *
+ * From the hardware's perspective:
  * Each table that we care about has a header, and the header has a
  * length that includes the the length of all its subtables. So, even
  * if you can't completely parse a table, you can find the next table.
@@ -28,6 +29,13 @@
  * function or case statement for each element type. DMARs are complex
  * and need functions; APICs are simple and we can get by with case
  * statements.
+ *
+ * Each node in the tree is represented as a 'struct Atable'. This has a
+ * pointer to the actual node data, a type tag, a name, pointers to this
+ * node's children (if any) and a parent pointer. It also has a QID so that
+ * the entire structure can be exposed as a filesystem. The Atable doesn't
+ * contain any table data per se; it's metadata. The table pointer contains
+ * the table data as well as a pointer back to it's corresponding Atable.
  *
  * In the end we present a directory tree for #apic that looks, in this example:
  * #acpi/DMAR/DRHD/0/{pretty,raw}
@@ -110,6 +118,7 @@ enum {
 	BGRT,
 	FPDT,
 	GTDT,
+	HPET,
 	NACPITBLS,			/* Number of ACPI tables */
 
 	/* SRAT types */
@@ -153,21 +162,18 @@ enum {
  * same array.
  */
 struct Atable {
+	struct qid qid;             /* qid corresponding to this table in the NS. */
 	int type;					/* this table's type */
-	char sig[SIGSZ];			/* signature */
-	char oemid[OEMIDSZ];		/* oem id str. */
-	char oemtblid[OEMTBLIDSZ];	/* oem table id str. */
-	struct qid qid;				/* qid corresponding to this table in the NS. */
 	void *tbl;					/* pointer to the converted table, e.g. madt. */
+	char *name;                 /* name of this table */
 
 	struct Atable *parent;		/* Parent pointer */
 	struct Atable *next;		/* sibling tables resulting from a scan. */
-	size_t siblingno;			/* index of this node in the sibling table. */
+	size_t sindex;	    		/* index of this node in the sibling table. */
 	struct Atable **children;	/* children of this node (an array). */
 	size_t nchildren;			/* count of this node's children */
 
 	size_t size;				/* Total size of raw table */
-	size_t dlen;				/* size of data in table; e.g. after header */
 	uint8_t raw[];				/* Raw data. */
 };
 
@@ -182,8 +188,9 @@ struct Gpe {
 };
 
 struct Parse {
-	char *sig;
-	void (*f) (struct Atable *, uint8_t *, int);
+	const char *sig;
+	void (*thunk)(struct Atable *, uint8_t *, int);
+	const size_t tblsz;
 };
 
 struct Regio {
@@ -211,6 +218,7 @@ struct Reg {
 /* Generic address structure.
  */
 struct Gas {
+	struct Atable *table;
 	uint8_t spc;				/* address space id */
 	uint8_t len;				/* register size in bits */
 	uint8_t off;				/* bit offset */
@@ -227,8 +235,8 @@ struct Gas {
  *	- SSDTs	tables with AML code to add to the acpi namespace.
  *	- pointers to other tables for apics, etc.
  */
-
 struct Rsdp {
+	struct Atable *table;
 	uint8_t signature[8];		/* "RSD PTR " */
 	uint8_t rchecksum;
 	uint8_t oemid[6];
@@ -243,6 +251,7 @@ struct Rsdp {
 /* Header for ACPI description tables
  */
 struct Sdthdr {
+	struct Atable *table;
 	uint8_t sig[4];				/* "FACP" or whatever */
 	uint8_t length[4];
 	uint8_t rev;
@@ -257,6 +266,7 @@ struct Sdthdr {
 /* Firmware control structure
  */
 struct Facs {
+	struct Atable *table;
 	uint32_t hwsig;
 	uint32_t wakingv;
 	uint32_t glock;
@@ -269,15 +279,14 @@ struct Facs {
 /* Maximum System Characteristics table
  */
 struct Msct {
+	struct Atable *table;
 	int ndoms;					/* number of domains */
 	int nclkdoms;				/* number of clock domains */
 	uint64_t maxpa;				/* max physical address */
-
-	struct Mdom *dom;			/* domain information list */
 };
 
 struct Mdom {
-	struct Mdom *next;
+	struct Atable *table;
 	int start;					/* start dom id */
 	int end;					/* end dom id */
 	int maxproc;				/* max processor capacity */
@@ -291,14 +300,14 @@ struct Mdom {
  * Only enabled devices are linked, others are filtered out.
  */
 struct Madt {
+	struct Atable *atable;
 	uint64_t lapicpa;			/* local APIC addr */
 	int pcat;					/* the machine has PC/AT 8259s */
-	struct Apicst *st;			/* list of Apic related structures */
 };
 
 struct Apicst {
+	struct Atable *atable;
 	int type;
-	struct Apicst *next;
 	union {
 		struct {
 			int pid;			/* processor id */
@@ -354,8 +363,8 @@ struct Apicst {
 /* System resource affinity table
  */
 struct Srat {
+	struct Atable *table;
 	int type;
-	struct Srat *next;
 	union {
 		struct {
 			int dom;			/* proximity domain */
@@ -381,6 +390,7 @@ struct Srat {
 /* System locality information table
  */
 struct Slit {
+	struct Atable *table;
 	uint64_t rowlen;
 	struct SlEntry **e;
 };
@@ -398,6 +408,7 @@ struct SlEntry {
  * Has address for the DSDT.
  */
 struct Fadt {
+	struct Atable *table;
 	uint32_t facs;
 	uint32_t dsdt;
 	/* 1 reserved */
@@ -454,6 +465,7 @@ struct Fadt {
 /* XSDT/RSDT. 4/8 byte addresses starting at p.
  */
 struct Xsdt {
+	struct Atable *table;
 	int len;
 	int asize;
 	uint8_t *p;
@@ -472,6 +484,7 @@ struct DeviceScope {
  * I can't think of anything that's not a total ugly clusterfuck.
  */
 struct Dtab {
+	struct Atable *table;
 	int type;
 	union {
 		struct Drhd {
@@ -485,6 +498,7 @@ struct Dtab {
 };
 
 struct Dmar {
+	struct Atable *table;
 	int haw;
 	/* no, sorry, if your stupid firmware disables x2apic
 	 * mode, you should not be here. We ignore that bit.

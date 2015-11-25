@@ -103,6 +103,50 @@ static char *regnames[] = {
 	"smb", "cmos", "pcibar",
 };
 
+/*
+ * A tracking structure for growing lists of Atables during parsing.
+ */
+struct Slice {
+	void **ptrs;
+	size_t len;
+	size_t size;
+};
+
+void clear(struct Slice *slice)
+{
+	len = 0;
+	memset(tables, 0, sizeof(*tables) * size);
+}
+
+void append(struct Slice *slice, void *ptr)
+{
+	if (slice->len == slice->size) {
+		void **ps;
+		slice->size *= 2;
+		if (slice->size == 0)
+			slice->size = 8;
+		ps = kreallocarray(slice->ptrs, slice->size, sizeof(void *));
+		assert(ps != NULL);		// XXX: Can never happen.
+	}
+	slice->ptrs[slice->len] = ptr;
+	slice->len++;
+}
+
+size_t len(struct Slice *slice) { return slice->len; }
+
+void *finalize(struct Slice *slice)
+{
+	void **ps;
+
+	ps = kreallocarray(slice->ptrs, slice->len, sizeof(void *));
+	assert(ps != NULL);
+	slice->len = 0;
+	slice->size = 0;
+	slice->ptrs = NULL;
+
+	return ps;
+}
+
 static void strlmove(char *dst, const void *src, size_t n)
 {
 	memmove(dst, src, n - 1);
@@ -1293,6 +1337,7 @@ static struct Parse ptables[] = {
 static int acpixsdtload(char *sig)
 {
 	struct Atable *a;
+	struct Slice slice;
 	ERRSTACK(1);
 	int i, l, t, found;
 	uintptr_t dhpa;
@@ -1300,19 +1345,30 @@ static int acpixsdtload(char *sig)
 	char table[128];
 	struct Atable *n;
 
+	memset(&slice, 0, sizeof(slice));
 	if (waserror()) {
+		free(slice.ptrs);
 		return 0;
 	}
 
 	/* oh and, of course, the xsdt format is like no other. So fake it. */
-	root = kzmalloc(sizeof(*root), KMALLOC_WAIT);
-	root->parent = root;
-	root->dlen = 0;
+	root = kzmalloc(sizeof(struct Aslice), KMALLOC_WAIT);
 	mkqid(&root->qid, Qroot, 0, Qdir);
+	root->type = XSDT;
+	root->tbl = NULL;
+	root->name = "XSDT";
+	root->parent = root;
+	root->next = NULL;
+	root->sindex = 0;
+	root->type = 0;
+	root->children = NULL;
+	root->nchildren = 0;
+	root->size = 0;
+
 
 	strlcpy(root->sig, ".", sizeof(root->sig));
 	found = 0;
-	for (i = 0, root->next = NULL; i < xsdt->len; i += xsdt->asize) {
+	for (i = 0, root->children = NULL; i < xsdt->len; i += xsdt->asize) {
 		dhpa = l64get(xsdt->p + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
@@ -1320,15 +1376,13 @@ static int acpixsdtload(char *sig)
 		memmove(a->raw, sdt, l);
 		// set up the "converted" structure with the name.
 		// TODO: fill in more bits.
-		strlmove(a->sig, sdt, sizeof(a->sig));
 		if (sig == NULL || strcmp(sig, a->sig) == 0) {
 			printd("acpi: %s addr %#p\n", tsig, sdt);
 			for (t = 0; t < ARRAY_SIZE(ptables); t++)
 				if (strcmp(a->sig, ptables[t].sig) == 0) {
 					//dumptable(table, &table[127], tsig, sdt, l);
-					ptables[t].f(a, sdt, l);
-					a->next = root->next;
-					root->next = a;
+					void *tbl = kmallocz(sizeof(struct Atable) + ptables[t].tblsz);
+					append(&slice, ptables[t].thunk(tbl, sdt, l));
 					found = 1;
 					break;
 				}
@@ -1349,15 +1403,15 @@ static void acpirsdptr(void)
 	}
 
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
-	       rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
-	       *(uint32_t *)rsd->raddr, *(uint32_t *)rsd->length,
-	       *(uint32_t *)rsd->xaddr, rsd->xchecksum);
+		   rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
+		   *(uint32_t *)rsd->raddr, *(uint32_t *)rsd->length,
+		   *(uint32_t *)rsd->xaddr, rsd->xchecksum);
 
 	printd("acpi: RSD PTR@ %#p, physaddr $%p length %ud %#llux rev %d\n",
 		   rsd, l32get(rsd->raddr), l32get(rsd->length),
 		   l64get(rsd->xaddr), rsd->revision);
 
-    if (rsd->revision < 2)
+	if (rsd->revision < 2)
 		panic("32 bit ACPI no longer supported");
 
 	if (sdtchecksum(rsd, 36) != 0) {
@@ -1883,7 +1937,7 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 	if (type < 0 || NACPITBLS < type)
 		return start;
 	if (acpisw[type].pretty == NULL)
-		return seprintf(start, end, "\"\",\n");
+		return seprintf(atbl, start, end, "\"\",\n");
 	return acpisw[type].pretty(atbl, start, end, arg);
 }
 
