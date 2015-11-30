@@ -168,14 +168,12 @@ enum {
  * same array.
  */
 struct Atable {
-	struct qid qid;             /* qid corresponding to this table in the NS. */
-	int type;					/* this table's type */
+	struct qid qid;             /* QID corresponding to this table. */
+	int type;					/* This table's type */
 	void *tbl;					/* pointer to the converted table, e.g. madt. */
 	char name[16];				/* name of this table */
 
 	struct Atable *parent;		/* Parent pointer */
-	struct Atable *next;		/* sibling tables resulting from a scan. */
-	size_t sindex;				/* index of this node in the sibling table. */
 	struct Atable **children;	/* children of this node (an array). */
 	size_t nchildren;			/* count of this node's children */
 

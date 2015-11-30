@@ -59,8 +59,6 @@ enum {
 	Atablesz = sizeof(struct Atable),
 };
 
-static uint8_t *rawtable;
-static size_t rawtablesz;
 static int lastPath = 1024;
 struct dev acpidevtab;
 
@@ -107,13 +105,18 @@ static char *regnames[] = {
 };
 
 /*
- * Lists to store RAM that we copy ACPI tables into.
+ * Lists to store RAM that we copy ACPI tables into. When we map a new
+ * ACPI list into the kernel, we copy it into a specifically RAM buffer
+ * (to make sure it's not coming from e.g. slow device memory). We store
+ * pointers to those buffers on these lists.
  */
-stuct Acpilist {
+struct Acpilist {
 	struct Acpilist *next;
 	size_t size;
 	int8_t raw[];
 };
+
+static struct Acpilist *acpilists;
 
 /*
  * A tracking structure for growing lists of Atables during parsing.
@@ -140,7 +143,7 @@ void append(struct Slice *s, void *p)
 		ps = kreallocarray(s->ptrs, s->size, sizeof(void *), KMALLOC_WAIT);
 		assert(ps != NULL);		/* XXX: if size*sizeof(void*) overflows. */
 	}
-	s->ptrs[slice->len] = ptr;
+	s->ptrs[s->len] = ptr;
 	s->len++;
 }
 
@@ -158,8 +161,6 @@ void *finalize(struct Slice *slice)
 
 	return ps;
 }
-
-static Acpilist *acpimem;
 
 /*
  * This is like strncpy, but always NUL terminates and doesn't zero pad (one
@@ -445,21 +446,21 @@ static long regio(struct Reg *r, void *p, uint32_t len, uintptr_t off, int iswr)
 	return len;
 }
 
-struct Atable *makeatable(uint8_t *p, size_t psize)
+struct Atable *makeatable(struct Atable *parent, uint8_t *p, size_t parsedsize)
 {
 	struct Atable *t;
 	struct Sdthdr *h;
-	size_t size;
+	size_t rawsize;
 
-	t = kzmalloc(Atablesz + psize, KMALLOC_WAIT);
+	t = kzmalloc(Atablesz + parsedsize, KMALLOC_WAIT);
 	if (t == NULL)
 		panic("no memory for more aml tables");
 	t->tbl = (void *)t + Atablesz;
-	if (psize == 0)
+	if (parsedsize == 0)
 		t->tbl = NULL;
 	h = (struct Sdthdr *)p;
 	size = l32get(h->length);
-	t->size = size;
+	t->size = rawsize;
 	t->raw = p;
 	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
 
@@ -508,6 +509,9 @@ static int8_t *sdtmap(uintptr_t pa, int *n, int cksum)
 		panic("sdtmap: memory allocation failed for %z bytes", *n);
 	}
 	memmove(p->raw, (void *)sdt, *n);
+	p->size = *n;
+	p->next = acpilists;
+	acpilists = p;
 
 	return p->raw;
 }
@@ -1348,8 +1352,8 @@ static void *rsdsearch(char *signature)
  */
 struct Parse {
 	const char *sig;
-	void (*thunk)(struct Atable *parent, uint8_t *data, size_t size);
-	size_t size;
+	void (*thunk)(struct Atable *parent, uint8_t *data, size_t rawsize);
+	size_t parsedsize;
 };
 
 
@@ -1390,21 +1394,18 @@ static void parsexsdt(struct Atable *root)
 		dhpa = (xsdt->asize == 8) ? l64get(xsdt->p + i) : l32get(xsdt->p + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
-		a = makeatable((uint8_t *)sdt, l);
-		// set up the "converted" structure with the name.
-		// TODO: fill in more bits.
-		if ((*root->name == '\0') ||
-		    (strncmp(root->name, sdt->sig, sizeof(sdt->sig)) == 0)) {
-			printd("acpi: %s addr %#p\n", tsig, sdt);
-			for (int j = 0; j < ARRAY_SIZE(ptables); j++)
-				if (strcmp(a->name, ptables[t].sig) == 0) {
-					//dumptable(table, &table[127], tsig, sdt, l);
-					void *tbl = kmallocz(Atablesz + ptables[t].size);
-					append(&slice, ptables[t].thunk(tbl, sdt, l));
-					break;
-				}
-		}
+		a = makeatable(root, (uint8_t *)sdt, l);
+		printd("acpi: %s addr %#p\n", tsig, sdt);
+		for (int j = 0; j < ARRAY_SIZE(ptables); j++)
+			if (strcmp(a->name, ptables[j].sig) == 0) {
+				struct Atable *tbl = kmallocz(Atablesz + ptables[j].size);
+				append(&slice, ptables[j].thunk(tbl, sdt, l));
+				break;
+			}
 	}
+	finalize(&slice);
+	root->children = slice.ptrs;
+	root->nchildren = len(&slice);
 }
 
 static void parsersdptr(void)
