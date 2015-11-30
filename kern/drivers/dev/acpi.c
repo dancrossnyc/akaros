@@ -1348,8 +1348,8 @@ static void *rsdsearch(char *signature)
  */
 struct Parse {
 	const char *sig;
-	void (*thunk)(struct Atable *, uint8_t *, int);
-	size_t tblsize;
+	void (*thunk)(struct Atable *parent, uint8_t *data, size_t size);
+	size_t size;
 };
 
 
@@ -1368,7 +1368,7 @@ static struct Parse ptables[] = {
  * process xsdt table and load tables with sig, or all if NULL.
  * (XXX: should be able to search for sig, oemid, oemtblid)
  */
-static void acpixsdtload(struct Atable *root)
+static void parsexsdt(struct Atable *root)
 {
 	struct Atable *a;
 	struct Slice slice;
@@ -1399,7 +1399,7 @@ static void acpixsdtload(struct Atable *root)
 			for (int j = 0; j < ARRAY_SIZE(ptables); j++)
 				if (strcmp(a->name, ptables[t].sig) == 0) {
 					//dumptable(table, &table[127], tsig, sdt, l);
-					tbl = kmallocz(sizeof(struct Atable) + ptables[t].tblsz);
+					void *tbl = kmallocz(Atablesz + ptables[t].size);
 					append(&slice, ptables[t].thunk(tbl, sdt, l));
 					break;
 				}
@@ -1467,12 +1467,7 @@ static void parsersdptr(void)
 	/*
 	 * process the RSDT or XSDT table.
 	 */
-	xsdt = kzmalloc(sizeof(struct Xsdt), KMALLOC_WAIT);
-	if (xsdt == NULL) {
-		panic("acpi: malloc failed\n");
-		return;
-	}
-	xsdt->table = root;
+	xsdt = (void *)root + sizeof(struct Aslice);
 	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
 		printk("acpi: sdtmap failed\n");
 		return;
@@ -1481,13 +1476,13 @@ static void parsersdptr(void)
 		|| memcmp(xsdt->p + 1, "SDT", 3) != 0) {
 		printd("acpi: xsdt sig: %c%c%c%c\n",
 		       xsdt->p[0], xsdt->p[1], xsdt->p[2], xsdt->p[3]);
-		kfree(xsdt);
+		kfree(xsdt->p);
 		xsdt = NULL;
 		return;
 	}
 	xsdt->asize = asize;
 	printd("acpi: XSDT %#p\n", xsdt);
-	acpixsdtload(root);
+	parsexsdt(root);
 	/* xsdt is kept and not unmapped */
 }
 
