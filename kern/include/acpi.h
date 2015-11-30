@@ -180,7 +180,7 @@ struct Atable {
 	size_t nchildren;			/* count of this node's children */
 
 	size_t size;				/* Total size of raw table */
-	uint8_t raw[];				/* Raw data. */
+	uint8_t *raw;				/* Raw data. */
 };
 
 struct Gpe {
@@ -191,12 +191,6 @@ struct Gpe {
 	int nb;						/* event number */
 	char *obj;					/* handler object  */
 	int id;						/* id as supplied by user */
-};
-
-struct Parse {
-	const char *sig;
-	void (*thunk)(struct Atable *, uint8_t *, int);
-	const size_t tblsz;
 };
 
 struct Regio {
@@ -224,7 +218,6 @@ struct Reg {
 /* Generic address structure.
  */
 struct Gas {
-	struct Atable *table;
 	uint8_t spc;				/* address space id */
 	uint8_t len;				/* register size in bits */
 	uint8_t off;				/* bit offset */
@@ -242,7 +235,6 @@ struct Gas {
  *	- pointers to other tables for apics, etc.
  */
 struct Rsdp {
-	struct Atable *table;
 	uint8_t signature[8];		/* "RSD PTR " */
 	uint8_t rchecksum;
 	uint8_t oemid[6];
@@ -257,7 +249,6 @@ struct Rsdp {
 /* Header for ACPI description tables
  */
 struct Sdthdr {
-	struct Atable *table;
 	uint8_t sig[4];				/* "FACP" or whatever */
 	uint8_t length[4];
 	uint8_t rev;
@@ -272,7 +263,6 @@ struct Sdthdr {
 /* Firmware control structure
  */
 struct Facs {
-	struct Atable *table;
 	uint32_t hwsig;
 	uint32_t wakingv;
 	uint32_t glock;
@@ -285,14 +275,12 @@ struct Facs {
 /* Maximum System Characteristics table
  */
 struct Msct {
-	struct Atable *table;
 	int ndoms;					/* number of domains */
 	int nclkdoms;				/* number of clock domains */
 	uint64_t maxpa;				/* max physical address */
 };
 
 struct Mdom {
-	struct Atable *table;
 	int start;					/* start dom id */
 	int end;					/* end dom id */
 	int maxproc;				/* max processor capacity */
@@ -306,13 +294,11 @@ struct Mdom {
  * Only enabled devices are linked, others are filtered out.
  */
 struct Madt {
-	struct Atable *atable;
 	uint64_t lapicpa;			/* local APIC addr */
 	int pcat;					/* the machine has PC/AT 8259s */
 };
 
 struct Apicst {
-	struct Atable *atable;
 	int type;
 	union {
 		struct {
@@ -369,7 +355,6 @@ struct Apicst {
 /* System resource affinity table
  */
 struct Srat {
-	struct Atable *table;
 	int type;
 	union {
 		struct {
@@ -396,7 +381,6 @@ struct Srat {
 /* System locality information table
  */
 struct Slit {
-	struct Atable *table;
 	uint64_t rowlen;
 	struct SlEntry **e;
 };
@@ -414,7 +398,6 @@ struct SlEntry {
  * Has address for the DSDT.
  */
 struct Fadt {
-	struct Atable *table;
 	uint32_t facs;
 	uint32_t dsdt;
 	/* 1 reserved */
@@ -471,9 +454,8 @@ struct Fadt {
 /* XSDT/RSDT. 4/8 byte addresses starting at p.
  */
 struct Xsdt {
-	struct Atable *table;
-	int len;
-	int asize;
+	size_t len;
+	size_t asize;
 	uint8_t *p;
 };
 
@@ -490,7 +472,6 @@ struct DeviceScope {
  * I can't think of anything that's not a total ugly clusterfuck.
  */
 struct Dtab {
-	struct Atable *table;
 	int type;
 	union {
 		struct Drhd {
@@ -504,7 +485,6 @@ struct Dtab {
 };
 
 struct Dmar {
-	struct Atable *table;
 	int haw;
 	/* no, sorry, if your stupid firmware disables x2apic
 	 * mode, you should not be here. We ignore that bit.
@@ -517,6 +497,5 @@ struct Dmar {
 extern uintptr_t acpimblocksize(uintptr_t, int *);
 
 int acpiinit(void);
-struct Atable *new_acpi_table(uint8_t *p);
 extern struct Madt *apics;
 extern struct Srat *srat;

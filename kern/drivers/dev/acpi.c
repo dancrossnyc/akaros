@@ -56,8 +56,11 @@ enum {
 	Qpretty,
 	Qraw,
 
+	Atablesz = sizeof(struct Atable),
 };
 
+static uint8_t *rawtable;
+static size_t rawtablesz;
 static int lastPath = 1024;
 struct dev acpidevtab;
 
@@ -104,6 +107,15 @@ static char *regnames[] = {
 };
 
 /*
+ * Lists to store RAM that we copy ACPI tables into.
+ */
+stuct Acpilist {
+	struct Acpilist *next;
+	size_t size;
+	int8_t raw[];
+};
+
+/*
  * A tracking structure for growing lists of Atables during parsing.
  */
 struct Slice {
@@ -146,6 +158,8 @@ void *finalize(struct Slice *slice)
 
 	return ps;
 }
+
+static Acpilist *acpimem;
 
 /*
  * This is like strncpy, but always NUL terminates and doesn't zero pad (one
@@ -431,24 +445,24 @@ static long regio(struct Reg *r, void *p, uint32_t len, uintptr_t off, int iswr)
 	return len;
 }
 
-struct Atable *new_acpi_table(uint8_t *p)
+struct Atable *makeatable(uint8_t *p, size_t psize)
 {
 	struct Atable *t;
 	struct Sdthdr *h;
-	int dlen;
+	size_t size;
 
-	h = (struct Sdthdr *)p;
-	dlen = l32get(h->length);
-
-	t = kzmalloc(sizeof(struct Atable) + dlen, KMALLOC_WAIT);
+	t = kzmalloc(Atablesz + psize, KMALLOC_WAIT);
 	if (t == NULL)
 		panic("no memory for more aml tables");
-	memcpy(t->raw, p, dlen);
-	h = (struct Sdthdr *)t->raw;
-	t->dlen = l32get(h->length) - Sdthdrsz;
-	strlmove(t->sig, h->sig, sizeof(t->sig));
-	strlmove(t->oemid, h->oemid, sizeof(t->oemid));
-	strlmove(t->oemtblid, h->oemtblid, sizeof(t->oemtblid));
+	t->tbl = (void *)t + Atablesz;
+	if (psize == 0)
+		t->tbl = NULL;
+	h = (struct Sdthdr *)p;
+	size = l32get(h->length);
+	t->size = size;
+	t->raw = p;
+	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
+
 	return t;
 }
 
@@ -466,9 +480,10 @@ static uint8_t sdtchecksum(void *addr, int len)
 	return sum;
 }
 
-static void *sdtmap(uintptr_t pa, int *n, int cksum)
+static int8_t *sdtmap(uintptr_t pa, int *n, int cksum)
 {
 	struct Sdthdr *sdt;
+	struct Acpilist *p;
 
 	if (!pa) {
 		printk("sdtmap: NULL pa\n");
@@ -476,7 +491,7 @@ static void *sdtmap(uintptr_t pa, int *n, int cksum)
 	}
 	sdt = KADDR_NOCHECK(pa);
 	if (sdt == NULL) {
-		printk("acpi: vmap1: NULL\n");
+		printk("acpi: vmap: NULL\n");
 		return NULL;
 	}
 	*n = l32get(sdt->length);
@@ -484,15 +499,17 @@ static void *sdtmap(uintptr_t pa, int *n, int cksum)
 		printk("sdt has zero length!\n");
 		return NULL;
 	}
-	if ((sdt = KADDR_NOCHECK(pa)) == NULL) {
-		printk("acpi: NULL vmap\n");
-		return NULL;
-	}
 	if (cksum != 0 && sdtchecksum(sdt, *n) != 0) {
 		printk("acpi: SDT: bad checksum\n");
 		return NULL;
 	}
-	return sdt;
+	p = kzmalloc(sizeof(struct Acpilist) + *n);
+	if (p == NULL) {
+		panic("sdtmap: memory allocation failed for %z bytes", *n);
+	}
+	memmove(p->raw, (void *)sdt, *n);
+
+	return p->raw;
 }
 
 static int loadfacs(uintptr_t pa)
@@ -503,7 +520,7 @@ static int loadfacs(uintptr_t pa)
 	if (facs == NULL) {
 		return -1;
 	}
-	if (memcmp(facs, "FACS", 4) != 0) {
+	if (memcmp(facs->hwsig, "FACS", 4) != 0) {
 		facs = NULL;
 		return -1;
 	}
@@ -1241,14 +1258,20 @@ static void acpidmar(struct Atable *a, uint8_t * p, int len)
 /*
  * Map the table and keep it there.
  */
-static void acpitable(struct Atable *a, uint8_t * p, int len)
+static void acpitable(struct Atable *a, uint8_t *p, size_t size)
 {
-	/* we found it. It's too small. now what? */
-	/* The previous code never even tested this case. The hell with it. */
-	if (len < Sdthdrsz) {
+	struct Sdthdr *h;
+	/*
+	 * We found it and it is too small.
+	 * Simply return with no side effect.
+	 */
+	if (size < Sdthdrsz) {
 		return;
 	}
-	a->tbl = new_acpi_table(p);
+	h = (struct Sdthdr *)p;
+	a->raw = p;
+	a->size = size;
+	strlmove(a->name, h->sig, sizeof(h->sig) + 1)
 }
 
 static char *dumptable(char *start, char *end, char *sig, uint8_t * p, int l)
@@ -1323,76 +1346,65 @@ static void *rsdsearch(char *signature)
  * non-endian-independent manner. Rather than bring in the huge wad o' code
  * that represents, we just the names.
  */
+struct Parse {
+	const char *sig;
+	void (*thunk)(struct Atable *, uint8_t *, int);
+	size_t tblsize;
+};
+
+
 static struct Parse ptables[] = {
-	{"FACP", acpifadt,},
-	{"APIC", acpimadt,},
-	{"DMAR", acpidmar,},
-	{"SRAT", acpisrat,},
-	{"SLIT", acpislit,},
-	{"MSCT", acpimsct,},
-	{"SSDT", acpitable,},
-//	{"HPET", acpihpet,},
+	{"FACP", acpifadt, sizeof(void *)},
+	{"APIC", acpimadt, sizeof(void *)},
+	{"DMAR", acpidmar, sizeof(void *)},
+	{"SRAT", acpisrat, sizeof(void *)},
+	{"SLIT", acpislit, sizeof(void *)},
+	{"MSCT", acpimsct, sizeof(void *)},
+	{"SSDT", acpitable, sizeof(struct Sdthdr)},
+//	{"HPET", acpihpet, sizeof(void *)},
 };
 
 /*
  * process xsdt table and load tables with sig, or all if NULL.
  * (XXX: should be able to search for sig, oemid, oemtblid)
  */
-static int acpixsdtload(char *sig)
+static void acpixsdtload(struct Atable *root)
 {
 	struct Atable *a;
 	struct Slice slice;
 	ERRSTACK(1);
-	int i, l, t, found;
+	size_t l;
 	uintptr_t dhpa;
 	uint8_t *sdt;
 	char table[128];
 	struct Atable *n;
+	void *tbl;
 
 	memset(&slice, 0, sizeof(slice));
 	if (waserror()) {
 		free(slice.ptrs);
-		return 0;
+		return;
 	}
 
-	/* oh and, of course, the xsdt format is like no other. So fake it. */
-	root = kzmalloc(sizeof(struct Aslice), KMALLOC_WAIT);
-	mkqid(&root->qid, Qroot, 0, Qdir);
-	root->type = XSDT;
-	root->tbl = NULL;
-	root->name = "XSDT";
-	root->parent = root;
-	root->next = NULL;
-	root->sindex = 0;
-	root->type = 0;
-	root->children = NULL;
-	root->nchildren = 0;
-	root->size = 0;
-
-
-	strlcpy(root->sig, ".", sizeof(root->sig));
-	found = 0;
-	for (i = 0, root->children = NULL; i < xsdt->len; i += xsdt->asize) {
-		dhpa = l64get(xsdt->p + i);
+	for (int i = 0; i < xsdt->len; i += xsdt->asize) {
+		dhpa = (xsdt->asize == 8) ? l64get(xsdt->p + i) : l32get(xsdt->p + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
-		a = new_acpi_table(sdt);
-		memmove(a->raw, sdt, l);
+		a = makeatable((uint8_t *)sdt, l);
 		// set up the "converted" structure with the name.
 		// TODO: fill in more bits.
-		if (sig == NULL || strcmp(sig, a->sig) == 0) {
+		if ((*root->name == '\0') ||
+		    (strncmp(root->name, sdt->sig, sizeof(sdt->sig)) == 0)) {
 			printd("acpi: %s addr %#p\n", tsig, sdt);
-			for (t = 0; t < ARRAY_SIZE(ptables); t++)
-				if (strcmp(a->sig, ptables[t].sig) == 0) {
+			for (int j = 0; j < ARRAY_SIZE(ptables); j++)
+				if (strcmp(a->name, ptables[t].sig) == 0) {
 					//dumptable(table, &table[127], tsig, sdt, l);
-					void *tbl = kmallocz(sizeof(struct Atable) + ptables[t].tblsz);
+					tbl = kmallocz(sizeof(struct Atable) + ptables[t].tblsz);
 					append(&slice, ptables[t].thunk(tbl, sdt, l));
-					found = 1;
 					break;
 				}
 		}
 	}
-	return found;
 }
 
 static void parsersdptr(void)
@@ -1412,11 +1424,11 @@ static void parsersdptr(void)
 	/*
 	 * Handcraft the root of ACPI parse tree.
 	 */
-	root = kzmalloc(sizeof(struct Aslice), KMALLOC_WAIT);
+	root = kzmalloc(sizeof(struct Aslice) + sizeof(struct Xsdt), KMALLOC_WAIT);
 	mkqid(&root->qid, Qroot, 0, Qdir);
 	root->type = XSDT;
-	root->tbl = NULL;
-	root->name = "XSDT";
+	root->tbl = root + sizeof(struct Aslice);
+	strlcpy(root->name, ".", sizeof(root->name));
 	root->parent = root;
 	root->next = NULL;
 	root->sindex = 0;
@@ -1455,28 +1467,27 @@ static void parsersdptr(void)
 	/*
 	 * process the RSDT or XSDT table.
 	 */
-	xsdt = kzmalloc(sizeof(struct Xsdt), 0);
+	xsdt = kzmalloc(sizeof(struct Xsdt), KMALLOC_WAIT);
 	if (xsdt == NULL) {
 		panic("acpi: malloc failed\n");
 		return;
 	}
+	xsdt->table = root;
 	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
 		printk("acpi: sdtmap failed\n");
 		return;
 	}
 	if ((xsdt->p[0] != 'R' && xsdt->p[0] != 'X')
 		|| memcmp(xsdt->p + 1, "SDT", 3) != 0) {
-		printd("acpi: xsdt sig: %c%c%c%c\n", xsdt->p[0], xsdt->p[1], xsdt->p[2],
-			   xsdt->p[3]);
+		printd("acpi: xsdt sig: %c%c%c%c\n",
+		       xsdt->p[0], xsdt->p[1], xsdt->p[2], xsdt->p[3]);
 		kfree(xsdt);
 		xsdt = NULL;
 		return;
 	}
-	xsdt->p += sizeof(struct Sdthdr);
-	xsdt->len -= sizeof(struct Sdthdr);
 	xsdt->asize = asize;
 	printd("acpi: XSDT %#p\n", xsdt);
-	acpixsdtload(NULL);
+	acpixsdtload(root);
 	/* xsdt is kept and not unmapped */
 }
 
@@ -1969,7 +1980,7 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 	if (type < 0 || NACPITBLS < type)
 		return start;
 	if (acpisw[type].pretty == NULL)
-		return seprintf(atbl, start, end, "\"\",\n");
+		return seprintf(atbl, start, end, "\"\"\n");
 	return acpisw[type].pretty(atbl, start, end, arg);
 }
 
