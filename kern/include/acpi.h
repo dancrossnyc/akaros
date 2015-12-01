@@ -125,6 +125,7 @@ enum {
 	FPDT,
 	GTDT,
 	HPET,
+	DMAR,
 	NACPITBLS,			/* Number of ACPI tables */
 
 	/* SRAT types */
@@ -176,6 +177,7 @@ struct Atable {
 	struct Atable *parent;		/* Parent pointer */
 	struct Atable **children;	/* children of this node (an array). */
 	size_t nchildren;			/* count of this node's children */
+	struct Atable *next;		/* Pointer to the next sibling. */
 
 	size_t size;				/* Total size of raw table */
 	uint8_t *raw;				/* Raw data. */
@@ -499,5 +501,5 @@ struct Dmar {
 extern uintptr_t acpimblocksize(uintptr_t, int *);
 
 int acpiinit(void);
-extern struct Madt *apics;
-extern struct Srat *srat;
+extern struct Atable *apics;
+extern struct Atable *srat;
