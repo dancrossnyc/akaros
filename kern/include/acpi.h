@@ -126,6 +126,7 @@ enum {
 	GTDT,
 	HPET,
 	DMAR,
+	APIC,
 	NACPITBLS,			/* Number of ACPI tables */
 
 	/* SRAT types */

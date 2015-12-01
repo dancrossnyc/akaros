@@ -94,7 +94,7 @@ struct Atable *apics;			/* APIC info */
 struct Atable *srat;			/* System resource affinity used by physalloc */
 struct Dmar *dmar;
 static struct Slit *slit;		/* Sys locality info table used by scheduler */
-static struct Msct *msct;		/* Maximum system characteristics table */
+static struct Atable *msct;		/* Maximum system characteristics table */
 static struct Reg *reg;			/* region used for I/O */
 static struct Gpe *gpes;		/* General purpose events */
 static int ngpes;
@@ -480,7 +480,7 @@ static uint8_t sdtchecksum(void *addr, int len)
 	return sum;
 }
 
-static void *sdtmap(uintptr_t pa, int *n, int cksum)
+static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 {
 	struct Sdthdr *sdt;
 	struct Acpilist *p;
@@ -517,7 +517,7 @@ static void *sdtmap(uintptr_t pa, int *n, int cksum)
 
 static int loadfacs(uintptr_t pa)
 {
-	int n;
+	size_t n;
 
 	facs = sdtmap(pa, &n, 0);
 	if (facs == NULL) {
@@ -541,7 +541,7 @@ static int loadfacs(uintptr_t pa)
 
 static void loaddsdt(uintptr_t pa)
 {
-	int n;
+	size_t n;
 	uint8_t *dsdtp;
 
 	dsdtp = sdtmap(pa, &n, 1);
@@ -714,12 +714,12 @@ static struct Atable *parsefadt(char *name, uint8_t *p, size_t rawsize)
 
 static char *dumpmsct(char *start, char *end, struct Atable *table)
 {
-	struct Mcst *mcst;
+	struct Msct *msct;
 
 	if (!table)
 		return start;
-	mcst = table->tbl;
-	if (!mcst)
+	msct = table->tbl;
+	if (!msct)
 		return start;
 
 	start = seprintf(start, end, "acpi: msct: %d doms %d clkdoms %#p maxpa\n",
@@ -739,9 +739,10 @@ static char *dumpmsct(char *start, char *end, struct Atable *table)
  * XXX: should perhaps update our idea of available memory.
  * Else we should remove this code.
  */
-static struct Atable *parsemsct(char *name, uint8_t *raw, int rawsize)
+static struct Atable *parsemsct(char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
+	struct Msct *msct;
 	uint8_t *r, *re;
 	struct Mdom **stl, *st;
 	size_t off, nmdom;
@@ -835,7 +836,7 @@ static char *dumpsrat(char *start, char *end, struct Atable *table)
 	return start;
 }
 
-static struct Atable *parsesrat(char *name, uint8_t *p, int rawsize)
+static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 {
 
 	struct Atable *t, *tt, *tail;
@@ -866,8 +867,8 @@ static struct Atable *parsesrat(char *name, uint8_t *p, int rawsize)
 				st->lapic.sapic = p[8];
 				st->lapic.clkdom = l32get(p + 12);
 				if (l32get(p + 4) == 0) {
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				}
 				break;
 			case SRmem:
@@ -876,8 +877,8 @@ static struct Atable *parsesrat(char *name, uint8_t *p, int rawsize)
 				st->mem.len = l64get(p + 16);
 				flags = l32get(p + 28);
 				if ((flags & 1) == 0) {	/* not enabled */
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				} else {
 					st->mem.hplug = flags & 2;
 					st->mem.nvram = flags & 4;
@@ -888,22 +889,23 @@ static struct Atable *parsesrat(char *name, uint8_t *p, int rawsize)
 				st->lx2apic.apic = l32get(p + 8);
 				st->lx2apic.clkdom = l32get(p + 16);
 				if (l32get(p + 12) == 0) {
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				}
 				break;
 			default:
 				printd("unknown SRAT structure\n");
-				kfree(st);
-				st = NULL;
+				kfree(tt);
+				tt = NULL;
 				break;
 		}
-		append(&slice, tt);
+		if (tt != NULL)
+			append(&slice, tt);
 	}
-	t->children = finalize(&slice);
-	t->nchildren = len(&slice);
-	tail = NULL;
 	i = len(&slice);
+	t->nchildren = i;
+	t->children = finalize(&slice);
+	tail = NULL;
 	while (--i > 0) {
 		t->children[i]->next = tail;
 		tail = t->children[i];
@@ -937,7 +939,7 @@ static int cmpslitent(void *v1, void *v2)
 	return se1->dist - se2->dist;
 }
 
-static struct Atable *parseslit(char *name, uint8_t *raw, int rawsize)
+static struct Atable *parseslit(char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
 	uint8_t *r, *re;
@@ -1106,31 +1108,36 @@ static char *dumpmadt(char *start, char *end, struct Atable *apics)
 	return start;
 }
 
-static void acpimadt(struct Atable *a, uint8_t * p, int len)
+static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 {
-
+	struct Atable *t, *tt, *tail;
 	uint8_t *pe;
-	struct Apicst *st, *l, **stl;
+	struct Madt *mt;
+	struct Apicst *st, *l;
 	int stlen, id;
+	char buf[16];
+	int i;
+	struct Slice slice;
 
-	a->tbl = apics = kzmalloc(sizeof(struct Madt), 1);
-	apics->lapicpa = l32get(p + 36);
-	apics->pcat = l32get(p + 40);
-	apics->st = NULL;
-	stl = &apics->st;
-	pe = p + len;
-	for (p += 44; p < pe; p += stlen) {
-		st = kzmalloc(sizeof(struct Apicst), 1);
+	memset(&slice, 0, sizeof(slice));
+	t = mkatable(MADT, name, p, size, sizeof(struct Madt));
+	mt = t->tbl;
+	mt->lapicpa = l32get(p + 36);
+	mt->pcat = l32get(p + 40);
+	pe = p + size;
+	for (p += 44, i = 0; p < pe; p += stlen, i++) {
+		snprintf(buf, sizeof(buf), "%d", i);
+		tt = mkatable(APIC, buf, p, 44, sizeof(struct Apicst));
+		st = tt->tbl;
 		st->type = p[0];
-		st->next = NULL;
 		stlen = p[1];
 		switch (st->type) {
 			case ASlapic:
 				st->lapic.pid = p[2];
 				st->lapic.id = p[3];
 				if (l32get(p + 4) == 0) {
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				}
 				break;
 			case ASioapic:
@@ -1138,12 +1145,14 @@ static void acpimadt(struct Atable *a, uint8_t * p, int len)
 				st->ioapic.addr = l32get(p + 4);
 				st->ioapic.ibase = l32get(p + 8);
 				/* ioapic overrides any ioapic entry for the same id */
-				for (l = apics->st; l != NULL; l = l->next)
+				for (i = 0; i < len(&slice); i++) {
+					l = ((struct Atable *)slice.ptrs[i])->tbl;
 					if (l->type == ASiosapic && l->iosapic.id == id) {
 						st->ioapic = l->iosapic;
 						/* we leave it linked; could be removed */
 						break;
 					}
+				}
 				break;
 			case ASintovr:
 				st->intovr.irq = p[3];
@@ -1163,20 +1172,22 @@ static void acpimadt(struct Atable *a, uint8_t * p, int len)
 				/* This is for 64 bits, perhaps we should not
 				 * honor it on 32 bits.
 				 */
-				apics->lapicpa = l64get(p + 8);
+				mt->lapicpa = l64get(p + 8);
 				break;
 			case ASiosapic:
 				id = st->iosapic.id = p[2];
 				st->iosapic.ibase = l32get(p + 4);
 				st->iosapic.addr = l64get(p + 8);
 				/* iosapic overrides any ioapic entry for the same id */
-				for (l = apics->st; l != NULL; l = l->next)
+				for (i = 0; i < len(&slice); i++) {
+					l = ((struct Atable*)slice.ptrs[i])->tbl;
 					if (l->type == ASioapic && l->ioapic.id == id) {
 						l->ioapic = st->iosapic;
-						kfree(st);
-						st = NULL;
+						kfree(tt);
+						tt = NULL;
 						break;
 					}
+				}
 				break;
 			case ASlsapic:
 				st->lsapic.pid = p[2];
@@ -1184,8 +1195,8 @@ static void acpimadt(struct Atable *a, uint8_t * p, int len)
 				st->lsapic.eid = p[4];
 				st->lsapic.puid = l32get(p + 12);
 				if (l32get(p + 8) == 0) {
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				} else
 					kstrdup(&st->lsapic.puids, (char *)p + 16);
 				break;
@@ -1202,8 +1213,8 @@ static void acpimadt(struct Atable *a, uint8_t * p, int len)
 				st->lx2apic.id = l32get(p + 4);
 				st->lx2apic.puid = l32get(p + 12);
 				if (l32get(p + 8) == 0) {
-					kfree(st);
-					st = NULL;
+					kfree(tt);
+					tt = NULL;
 				}
 				break;
 			case ASlx2nmi:
@@ -1213,14 +1224,22 @@ static void acpimadt(struct Atable *a, uint8_t * p, int len)
 				break;
 			default:
 				printd("unknown APIC structure\n");
-				kfree(st);
-				st = NULL;
+				kfree(tt);
+				tt = NULL;
 		}
-		if (st != NULL) {
-			*stl = st;
-			stl = &st->next;
-		}
+		if (tt != NULL)
+			append(&slice, tt);
 	}
+	i = len(&slice);
+	t->nchildren = i;
+	t->children = finalize(&slice);
+	tail = NULL;
+	while (--i > 0) {
+		t->children[i]->next = tail;
+		tail = t->children[i];
+	}
+
+	return t;
 }
 
 /*
@@ -1318,7 +1337,7 @@ static struct Atable *parsedmar(char *name, uint8_t *raw, size_t rawsize)
 /*
  * Map the table and keep it there.
  */
-static Atable *parsessdt(char *name, uint8_t *raw, size_t size)
+static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 {
 	struct Atable *t;
 	struct Sdthdr *h;
@@ -1334,7 +1353,7 @@ static Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 	h = (struct Sdthdr *)raw;
 	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
 	t->raw = raw;
-	t->rawsize = size;
+	t->size = size;
 
 	return t;
 }
@@ -1367,9 +1386,9 @@ static char *seprinttable(char *s, char *e, struct Atable *t)
 	uint8_t *p;
 	int i, n;
 
-	p = (uint8_t *) t->tbl;	/* include header */
-	n = Sdthdrsz + t->dlen;
-	s = seprintf(s, e, "%s @ %#p\n", t->sig, p);
+	p = (uint8_t *)t->tbl;	/* include header */
+	n = t->size;
+	s = seprintf(s, e, "%s @ %#p\n", t->name, p);
 	for (i = 0; i < n; i++) {
 		if ((i % 16) == 0)
 			s = seprintf(s, e, "%x: ", i);
@@ -1413,18 +1432,17 @@ static void *rsdsearch(char *signature)
  */
 struct Parser {
 	char *sig;
-	struct Atable *(*parse)(char *name, uint8_t *raw,
-	                        size_t rawsize);
+	struct Atable *(*parse)(char *name, uint8_t *raw, size_t rawsize);
 };
 
 
 static struct Parser ptable[] = {
 	{"FACP", parsefadt},
-	{"APIC", acpimadt},
+	{"APIC", parsemadt},
 	{"DMAR", parsedmar},
-	{"SRAT", acpisrat},
+	{"SRAT", parsesrat},
 	{"SLIT", parseslit},
-	{"MSCT", acpimsct},
+	{"MSCT", parsemsct},
 	{"SSDT", parsessdt},
 //	{"HPET", acpihpet},
 };
@@ -1435,13 +1453,12 @@ static struct Parser ptable[] = {
  */
 static void parsexsdt(struct Atable *root)
 {
-	struct Atable *a;
+	struct Sdthdr *sdt;
+	struct Atable *table;
 	struct Slice slice;
 	ERRSTACK(1);
 	size_t l;
 	uintptr_t dhpa;
-	uint8_t *sdt;
-	char table[128];
 	struct Atable *n;
 	void *tbl;
 
@@ -1457,16 +1474,15 @@ static void parsexsdt(struct Atable *root)
 			continue;
 		printd("acpi: %s addr %#p\n", tsig, sdt);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++)
-			if (strcmp(a->name, ptable[j].sig) == 0) {
-				struct Atable *table = ptable[j].parse(ptable[j].sig, sdt, l);
+			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
+				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
 				table->parent = root;
 				append(&slice, table);
 				break;
 			}
 	}
-	finalize(&slice);
-	root->children = slice.ptrs;
 	root->nchildren = len(&slice);
+	root->children = finalize(&slice);
 }
 
 static void parsersdptr(void)
@@ -1486,14 +1502,13 @@ static void parsersdptr(void)
 	/*
 	 * Handcraft the root of ACPI parse tree.
 	 */
-	root = kzmalloc(sizeof(struct Aslice) + sizeof(struct Xsdt), KMALLOC_WAIT);
+	root = kzmalloc(Atablesz + sizeof(struct Xsdt), KMALLOC_WAIT);
 	mkqid(&root->qid, Qroot, 0, Qdir);
 	root->type = XSDT;
-	root->tbl = root + sizeof(struct Aslice);
+	root->tbl = root + sizeof(struct Atable);
 	strlcpy(root->name, ".", sizeof(root->name));
 	root->parent = root;
 	root->next = NULL;
-	root->sindex = 0;
 	root->type = 0;
 	root->children = NULL;
 	root->nchildren = 0;
@@ -1529,7 +1544,7 @@ static void parsersdptr(void)
 	/*
 	 * process the RSDT or XSDT table.
 	 */
-	xsdt = (void *)root + sizeof(struct Aslice);
+	xsdt = root->tbl;
 	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
 		printk("acpi: sdtmap failed\n");
 		return;
@@ -1578,7 +1593,7 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 	printk("ix is %d and a is %p\n", ix, a);
 	if (ix < i || !a)
 		return -1;
-	devdir(c, a->qid, a->sig, 0, eve, 0555, dp);
+	devdir(c, a->qid, a->name, 0, eve, 0555, dp);
 	c->aux = a;
 	printk("REturning %d\n", 1);
 	return 1;
@@ -2039,7 +2054,7 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 	if (type < 0 || NACPITBLS < type)
 		return start;
 	if (acpisw[type].pretty == NULL)
-		return seprintf(atbl, start, end, "\"\"\n");
+		return seprintf(start, end, "\"\"\n");
 	return acpisw[type].pretty(atbl, start, end, arg);
 }
 
