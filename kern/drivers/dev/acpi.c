@@ -1298,10 +1298,10 @@ static struct Atable *parsedmar(char *name, uint8_t *raw, size_t rawsize)
 	/* the table can be only partly filled. Don't we all love ACPI?
 	 * No, we f@@@ing hate it.
 	 */
-	 if (baselen >= 38 && p[37] &1 1) {
-	 	dmar->intr_remap = 1;
-	 if (baselen >= 37)
-	 	dmar->haw = p[36] + 1;
+	if (baselen >= 38 && p[37] &1 1) {
+		dmar->intr_remap = 1;
+	if (baselen >= 37)
+		dmar->haw = p[36] + 1;
 	/* now we get to walk all the 2 byte elements, ain't it
 	 * grand.
 	 */
