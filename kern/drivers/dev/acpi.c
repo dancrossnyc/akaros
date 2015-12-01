@@ -85,7 +85,7 @@ static struct dirtab acpidir[] = {
 };
 
 static struct Facs *facs;		/* Firmware ACPI control structure */
-static struct Fadt fadt;		/* Fixed ACPI description to reach ACPI regs */
+static struct Fadt *fadt;		/* Fixed ACPI description to reach ACPI regs */
 static struct Atable *root;
 static struct Xsdt *xsdt;		/* XSDT table */
 static struct Atable *tfirst;	/* loaded DSDT/SSDT/... tables */
@@ -101,7 +101,7 @@ static int ngpes;
 
 static char *regnames[] = {
 	"mem", "io", "pcicfg", "embed",
-	"smb", "cmos", "pcibar",
+	"smb", "cmos", "pcibar", "ipmi",
 };
 
 /*
@@ -143,7 +143,7 @@ void append(struct Slice *s, void *p)
 		ps = kreallocarray(s->ptrs, s->size, sizeof(void *), KMALLOC_WAIT);
 		assert(ps != NULL);		/* XXX: if size*sizeof(void*) overflows. */
 	}
-	s->ptrs[s->len] = ptr;
+	s->ptrs[s->len] = p;
 	s->len++;
 }
 
@@ -153,7 +153,7 @@ void *finalize(struct Slice *slice)
 {
 	void **ps;
 
-	ps = kreallocarray(slice->ptrs, slice->len, sizeof(void *));
+	ps = kreallocarray(slice->ptrs, slice->len, sizeof(void *), KMALLOC_WAIT);
 	assert(ps != NULL);
 	slice->len = 0;
 	slice->size = 0;
@@ -170,6 +170,30 @@ static void strlmove(char *dst, const void *src, size_t n)
 {
 	memmove(dst, src, n - 1);
 	dst[n - 1] = '\0';
+}
+
+static struct Atable *mkatable(int type, char *name, uint8_t *raw,
+                               size_t rawsize, size_t addsize)
+{
+	void *m;
+	struct Atable *t;
+	struct Sdthdr *h;
+	size_t rawsize;
+
+	m = kzmalloc(Atablesz + addsize, KMALLOC_WAIT);
+	if (m == NULL)
+		panic("no memory for more aml tables");
+	t = m;
+	t->tbl = m + Atablesz;
+	if (addsize == 0)
+		t->tbl = NULL;
+	h = (struct Sdthdr *)raw;
+	rawsize = l32get(h->length);
+	t->size = rawsize;
+	t->raw = raw;
+	strlcpy(t->name, name, sizeof(t->name));
+
+	return t;
 }
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g);
@@ -446,27 +470,6 @@ static long regio(struct Reg *r, void *p, uint32_t len, uintptr_t off, int iswr)
 	return len;
 }
 
-struct Atable *makeatable(struct Atable *parent, uint8_t *p, size_t parsedsize)
-{
-	struct Atable *t;
-	struct Sdthdr *h;
-	size_t rawsize;
-
-	t = kzmalloc(Atablesz + parsedsize, KMALLOC_WAIT);
-	if (t == NULL)
-		panic("no memory for more aml tables");
-	t->tbl = (void *)t + Atablesz;
-	if (parsedsize == 0)
-		t->tbl = NULL;
-	h = (struct Sdthdr *)p;
-	size = l32get(h->length);
-	t->size = rawsize;
-	t->raw = p;
-	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
-
-	return t;
-}
-
 /*
  * Compute and return SDT checksum: '0' is a correct sum.
  */
@@ -481,7 +484,7 @@ static uint8_t sdtchecksum(void *addr, int len)
 	return sum;
 }
 
-static int8_t *sdtmap(uintptr_t pa, int *n, int cksum)
+static void *sdtmap(uintptr_t pa, int *n, int cksum)
 {
 	struct Sdthdr *sdt;
 	struct Acpilist *p;
@@ -504,7 +507,7 @@ static int8_t *sdtmap(uintptr_t pa, int *n, int cksum)
 		printk("acpi: SDT: bad checksum\n");
 		return NULL;
 	}
-	p = kzmalloc(sizeof(struct Acpilist) + *n);
+	p = kzmalloc(sizeof(struct Acpilist) + *n, KMALLOC_WAIT);
 	if (p == NULL) {
 		panic("sdtmap: memory allocation failed for %z bytes", *n);
 	}
@@ -524,12 +527,12 @@ static int loadfacs(uintptr_t pa)
 	if (facs == NULL) {
 		return -1;
 	}
-	if (memcmp(facs->hwsig, "FACS", 4) != 0) {
+	if (memcmp(facs->sig, "FACS", 4) != 0) {
 		facs = NULL;
 		return -1;
 	}
-	/* no unmap */
 
+	/* no unmap */
 	printd("acpi: facs: hwsig: %#p\n", facs->hwsig);
 	printd("acpi: facs: wakingv: %#p\n", facs->wakingv);
 	printd("acpi: facs: flags: %#p\n", facs->flags);
@@ -629,15 +632,19 @@ static char *dumpfadt(char *start, char *end, struct Fadt *fp)
 	return start;
 }
 
-static void acpifadt(struct Atable *a, uint8_t * p, int len)
+static struct Atable *parsefadt(char *name, uint8_t *p, size_t size)
 {
+	struct Atable *t;
 	struct Fadt *fp;
+
+	t = mkatable(FADT, "fadt", p, size, sizeof(struct Fadt));
 
 	if (len < 116) {
 		printk("ACPI: unusually short FADT, aborting!\n");
 	}
 	/* for now, keep the globals. We'll get rid of them later. */
-	fp = a->tbl = &fadt;
+	fp = t->tbl;
+	fadt = fp;
 	fp->facs = l32get(p + 36);
 	fp->dsdt = l32get(p + 40);
 	fp->pmprofile = p[45];
@@ -700,12 +707,12 @@ static void acpifadt(struct Atable *a, uint8_t * p, int len)
 	else
 		loadfacs(fp->facs);
 
-	if (fp->xdsdt == ((uint64_t) fp->dsdt))	/* acpica */
+	if (fp->xdsdt == (uint64_t)fp->dsdt)	/* acpica */
 		loaddsdt(fp->xdsdt);
 	else
 		loaddsdt(fp->dsdt);
 
-	return;
+	return t;
 }
 
 static char *dumpmsct(char *start, char *end, struct Msct *msct)
@@ -727,30 +734,37 @@ static char *dumpmsct(char *start, char *end, struct Msct *msct)
  * XXX: should perhaps update our idea of available memory.
  * Else we should remove this code.
  */
-static void acpimsct(struct Atable *a, uint8_t * p, int len)
+static struct Atable *parsemsct(struct Atable *parent, uint8_t *raw, int size)
 {
-	uint8_t *pe;
+	struct Atable *t;
+	uint8_t *r, *re;
 	struct Mdom **stl, *st;
-	int off;
+	Slice slice;
+	size_t off, nmdom;
 
-	msct = a->tbl = kzmalloc(sizeof(struct Msct), 0);
-	msct->ndoms = l32get(p + 40) + 1;
-	msct->nclkdoms = l32get(p + 44) + 1;
-	msct->maxpa = l64get(p + 48);
+	re = raw + rawsize;
+	off = l32get(raw + 36);
+	nmdom = 0;
+	for (r = raw + off, re = raw + rawsize; r < re; r += 22)
+		nmdom++;
+	t = mkatable(MSCT, "msct", raw, size
+	             sizeof(struct Msct) + nmdom * sizeof(struct Mdom));
+	msct = a->tbl;
+	msct->ndoms = l32get(raw + 40) + 1;
+	msct->nclkdoms = l32get(raw + 44) + 1;
+	msct->maxpa = l64get(raw + 48);
+	msct->nmdom = nmdom;
 	msct->dom = NULL;
-	stl = &msct->dom;
-	pe = p + len;
-	off = l32get(p + 36);
-	for (p += off; p < pe; p += 22) {
-		st = kzmalloc(sizeof(struct Mdom), 0);
-		st->next = NULL;
-		st->start = l32get(p + 2);
-		st->end = l32get(p + 6);
-		st->maxproc = l32get(p + 10);
-		st->maxmem = l64get(p + 14);
-		*stl = st;
-		stl = &st->next;
+	if (nmdom != 0)
+		msct->dom = (void *)msct + sizeof(struct Msct);
+	for (int i = 0, r = raw; i < nmdom; i++, r += 22) {
+		msct->dom[i].start = l32get(r + 2);
+		msct->dom[i].end = l32get(r + 6);
+		msct->dom[i].maxproc = l32get(r + 10);
+		msct->dom[i].maxmem = l64get(r + 14);
 	}
+
+	return t;
 }
 
 static char *dmartype[] = {"DRHD", "RMRR", "ATSR", "RHSA", "ANDD", };
@@ -903,33 +917,45 @@ static int cmpslitent(void *v1, void *v2)
 	return se1->dist - se2->dist;
 }
 
-static void acpislit(struct Atable *a, uint8_t * p, int len)
+static struct Atable *parseslit(struct Atable *parent, uint8_t *raw, int size)
 {
-
-	uint8_t *pe;
+	struct Atable *t;
+	uint8_t *r, *re;
 	int i, j, k;
 	struct SlEntry *se;
+	size_t add, rowlen;
+	void *p;
 
-	pe = p + len;
-	a->tbl = slit = kzmalloc(sizeof(*slit), 0);
-	slit->rowlen = l64get(p + 36);
-	slit->e = kzmalloc(slit->rowlen * sizeof(struct SlEntry *), 0);
-	for (i = 0; i < slit->rowlen; i++)
-		slit->e[i] = kzmalloc(sizeof(struct SlEntry) * slit->rowlen, 0);
+	add = sizeof(*slit);
+	rowlen = l64get(raw + 36);
+	add += rowlen * sizeof(struct SlEntry *);
+	add += sizeof(struct SlEntry) * rowlen * rowlen);
 
-	i = 0;
-	for (p += 44; p < pe; p++, i++) {
-		j = i / slit->rowlen;
-		k = i % slit->rowlen;
+	t = mkatable(SLIT, "slit", raw, size, add);
+	slit = t->tbl;
+	slit->rowlen = rowlen;
+	p = (void *)slit + sizeof(*slit);
+	slit->e = p;
+	p += rowlen * sizeof(struct SlEntry *);
+	for (i = 0; i < rowlen; i++) {
+		slit->e[i] = p;
+		p += sizeof(struct SlEntry) * rowlen;
+	}
+	for (i = 0, r = raw + 44, re = raw + size; r < re; r++, i++) {
+		int j = i / rowlen;
+		int k = i % rowlen;
 		se = &slit->e[j][k];
 		se->dom = k;
-		se->dist = *p;
+		se->dist = *r;
 	}
+
 #if 0
 	/* TODO: might need to sort this shit */
 	for (i = 0; i < slit->rowlen; i++)
 		qsort(slit->e[i], slit->rowlen, sizeof(slit->e[0][0]), cmpslitent);
 #endif
+
+	return t;
 }
 
 uintptr_t acpimblocksize(uintptr_t addr, int *dom)
@@ -1218,14 +1244,21 @@ static int dtab(uint8_t *p, struct Dtab *dtab)
 	return len;
 }
 
-static void acpidmar(struct Atable *a, uint8_t * p, int len)
+static struct Atable *parsedmar(struct Atable *parent, uint8_t *p, size_t size)
 {
+	struct Atable *t;
+
+	t = NULL;
+
+	return t;
+
+#if 0
 	int i;
 	int baselen = len > 38 ? 38 : len;
 	int nentry, off;
 
 	/* count the entries */
-	for(nentry = 0, off = 48; off < len; nentry++) {
+	for (nentry = 0, off = 48; off < len; nentry++) {
 		int dslen = p[off+2]|(p[off+3]<<8);
 		printk("@%d it is %p 0x%x/0x%x\n",
 			   nentry, p, p[off]|(p[off+1]<<8), dslen);
@@ -1237,16 +1270,10 @@ static void acpidmar(struct Atable *a, uint8_t * p, int len)
 	/* the table can be only partly filled. Don't we all love ACPI?
 	 * No, we f@@@ing hate it.
 	 */
-	switch(baselen) {
-	default:
-			break;
-
-	case 38:
-		if (p[37] & 1)
-			dmar->intr_remap = 1;
-	case 37:
-		dmar->haw = p[36] + 1;
-	}
+	 if (baselen >= 38 && p[37] &1 1) {
+	 	dmar->intr_remap = 1;
+	 if (baselen >= 37)
+	 	dmar->haw = p[36] + 1;
 	/* now we get to walk all the 2 byte elements, ain't it
 	 * grand.
 	 */
@@ -1257,25 +1284,31 @@ static void acpidmar(struct Atable *a, uint8_t * p, int len)
 		dtab(&p[off], &dmar->dtab[i]);
 		off += dslen;
 	}
+#endif
 }
 
 /*
  * Map the table and keep it there.
  */
-static void acpitable(struct Atable *a, uint8_t *p, size_t size)
+static Atable *parsessdt(struct Atable *parent, uint8_t *raw, size_t size)
 {
+	struct Atable *t;
 	struct Sdthdr *h;
+
 	/*
 	 * We found it and it is too small.
 	 * Simply return with no side effect.
 	 */
 	if (size < Sdthdrsz) {
-		return;
+		return NULL;
 	}
-	h = (struct Sdthdr *)p;
-	a->raw = p;
-	a->size = size;
-	strlmove(a->name, h->sig, sizeof(h->sig) + 1)
+	t = mkatable(SSDT, "ssdt", raw, size, 0);
+	h = (struct Sdthdr *)raw;
+	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
+	t->raw = raw;
+	t->rawsize = size;
+
+	return t;
 }
 
 static char *dumptable(char *start, char *end, char *sig, uint8_t * p, int l)
@@ -1350,22 +1383,22 @@ static void *rsdsearch(char *signature)
  * non-endian-independent manner. Rather than bring in the huge wad o' code
  * that represents, we just the names.
  */
-struct Parse {
+struct Parser {
 	const char *sig;
-	void (*thunk)(struct Atable *parent, uint8_t *data, size_t rawsize);
+	struct Atable *(*parse)(uint8_t *raw, size_t rawsize);
 	size_t parsedsize;
 };
 
 
-static struct Parse ptables[] = {
-	{"FACP", acpifadt, sizeof(void *)},
-	{"APIC", acpimadt, sizeof(void *)},
-	{"DMAR", acpidmar, sizeof(void *)},
-	{"SRAT", acpisrat, sizeof(void *)},
-	{"SLIT", acpislit, sizeof(void *)},
-	{"MSCT", acpimsct, sizeof(void *)},
-	{"SSDT", acpitable, sizeof(struct Sdthdr)},
-//	{"HPET", acpihpet, sizeof(void *)},
+static struct Parser ptable[] = {
+	{"FACP", parsefadt},
+	{"APIC", acpimadt},
+	{"DMAR", parsedmar},
+	{"SRAT", acpisrat},
+	{"SLIT", parseslit},
+	{"MSCT", acpimsct},
+	{"SSDT", parsessdt},
+//	{"HPET", acpihpet},
 };
 
 /*
@@ -1394,12 +1427,12 @@ static void parsexsdt(struct Atable *root)
 		dhpa = (xsdt->asize == 8) ? l64get(xsdt->p + i) : l32get(xsdt->p + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
-		a = makeatable(root, (uint8_t *)sdt, l);
 		printd("acpi: %s addr %#p\n", tsig, sdt);
-		for (int j = 0; j < ARRAY_SIZE(ptables); j++)
-			if (strcmp(a->name, ptables[j].sig) == 0) {
-				struct Atable *tbl = kmallocz(Atablesz + ptables[j].size);
-				append(&slice, ptables[j].thunk(tbl, sdt, l));
+		for (int j = 0; j < ARRAY_SIZE(ptable); j++)
+			if (strcmp(a->name, ptable[j].sig) == 0) {
+				struct Atable *table = ptable[j].parse(root, sdt, l);
+				table->parent = root;
+				append(&slice, table);
 				break;
 			}
 	}
@@ -1525,10 +1558,6 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g)
 {
-	static char *rnames[] = {
-		"mem", "io", "pcicfg", "embed",
-		"smb", "cmos", "pcibar", "ipmi"
-	};
 	start = seprintf(start, end, "%s", prefix);
 
 	switch (g->spc) {
@@ -1539,7 +1568,7 @@ static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g)
 		case Rcmos:
 		case Rpcibar:
 		case Ripmi:
-			start = seprintf(start, end, "[%s ", rnames[g->spc]);
+			start = seprintf(start, end, "[%s ", regnames[g->spc]);
 			break;
 		case Rpcicfg:
 			start = seprintf(start, end, "[pci ");
@@ -1626,25 +1655,29 @@ static unsigned int setbanked(uintptr_t ra, uintptr_t rb, int sz, int v)
 
 static unsigned int getpm1ctl(void)
 {
-	return getbanked(fadt.pm1acntblk, fadt.pm1bcntblk, fadt.pm1cntlen);
+	assert(fadt != NULL);
+	return getbanked(fadt->pm1acntblk, fadt->pm1bcntblk, fadt->pm1cntlen);
 }
 
 static void setpm1sts(unsigned int v)
 {
-	setbanked(fadt.pm1aevtblk, fadt.pm1bevtblk, fadt.pm1evtlen / 2, v);
+	assert(fadt != NULL);
+	setbanked(fadt->pm1aevtblk, fadt->pm1bevtblk, fadt->pm1evtlen / 2, v);
 }
 
 static unsigned int getpm1sts(void)
 {
-	return getbanked(fadt.pm1aevtblk, fadt.pm1bevtblk, fadt.pm1evtlen / 2);
+	assert(fadt != NULL);
+	return getbanked(fadt->pm1aevtblk, fadt->pm1bevtblk, fadt->pm1evtlen / 2);
 }
 
 static unsigned int getpm1en(void)
 {
 	int sz;
 
-	sz = fadt.pm1evtlen / 2;
-	return getbanked(fadt.pm1aevtblk + sz, fadt.pm1bevtblk + sz, sz);
+	assert(fadt != NULL);
+	sz = fadt->pm1evtlen / 2;
+	return getbanked(fadt->pm1aevtblk + sz, fadt->pm1bevtblk + sz, sz);
 }
 
 static int getgpeen(int n)
@@ -1709,23 +1742,24 @@ static void initgpes(void)
 {
 	int i, n0, n1;
 
-	n0 = fadt.gpe0blklen / 2;
-	n1 = fadt.gpe1blklen / 2;
+	assert(fadt != NULL);
+	n0 = fadt->gpe0blklen / 2;
+	n1 = fadt->gpe1blklen / 2;
 	ngpes = n0 + n1;
 	gpes = kzmalloc(sizeof(struct Gpe) * ngpes, 1);
 	for (i = 0; i < n0; i++) {
 		gpes[i].nb = i;
 		gpes[i].stsbit = i & 7;
-		gpes[i].stsio = fadt.gpe0blk + (i >> 3);
+		gpes[i].stsio = fadt->gpe0blk + (i >> 3);
 		gpes[i].enbit = (n0 + i) & 7;
-		gpes[i].enio = fadt.gpe0blk + ((n0 + i) >> 3);
+		gpes[i].enio = fadt->gpe0blk + ((n0 + i) >> 3);
 	}
 	for (i = 0; i + n0 < ngpes; i++) {
-		gpes[i + n0].nb = fadt.gp1base + i;
+		gpes[i + n0].nb = fadt->gp1base + i;
 		gpes[i + n0].stsbit = i & 7;
-		gpes[i + n0].stsio = fadt.gpe1blk + (i >> 3);
+		gpes[i + n0].stsio = fadt->gpe1blk + (i >> 3);
 		gpes[i + n0].enbit = (n1 + i) & 7;
-		gpes[i + n0].enio = fadt.gpe1blk + ((n1 + i) >> 3);
+		gpes[i + n0].enio = fadt->gpe1blk + ((n1 + i) >> 3);
 	}
 	for (i = 0; i < ngpes; i++) {
 		setgpeen(i, 0);
@@ -1744,10 +1778,10 @@ static void acpiioalloc(unsigned int addr, int len)
 int acpiinit(void)
 {
 	/* this smicmd test implements 'run once' for now. */
-	if (fadt.smicmd == 0) {
+	if (fadt == NULL || fadt->smicmd == 0) {
 		//fmtinstall('G', Gfmt);
 		parsersdptr();
-		if (fadt.smicmd == 0) {
+		if (fadt == NULL || fadt->smicmd == 0) {
 			return -1;
 		}
 	}
@@ -1771,15 +1805,16 @@ static struct chan *acpiattach(char *spec)
 	 * should use fadt->xpm* and fadt->xgpe* registers for 64 bits.
 	 * We are not ready in this kernel for that.
 	 */
-	acpiioalloc(fadt.smicmd, 1);
-	acpiioalloc(fadt.pm1aevtblk, fadt.pm1evtlen);
-	acpiioalloc(fadt.pm1bevtblk, fadt.pm1evtlen);
-	acpiioalloc(fadt.pm1acntblk, fadt.pm1cntlen);
-	acpiioalloc(fadt.pm1bcntblk, fadt.pm1cntlen);
-	acpiioalloc(fadt.pm2cntblk, fadt.pm2cntlen);
-	acpiioalloc(fadt.pmtmrblk, fadt.pmtmrlen);
-	acpiioalloc(fadt.gpe0blk, fadt.gpe0blklen);
-	acpiioalloc(fadt.gpe1blk, fadt.gpe1blklen);
+	assert(fadt != NULL);
+	acpiioalloc(fadt->smicmd, 1);
+	acpiioalloc(fadt->pm1aevtblk, fadt->pm1evtlen);
+	acpiioalloc(fadt->pm1bevtblk, fadt->pm1evtlen);
+	acpiioalloc(fadt->pm1acntblk, fadt->pm1cntlen);
+	acpiioalloc(fadt->pm1bcntblk, fadt->pm1cntlen);
+	acpiioalloc(fadt->pm2cntblk, fadt->pm2cntlen);
+	acpiioalloc(fadt->pmtmrblk, fadt->pmtmrlen);
+	acpiioalloc(fadt->gpe0blk, fadt->gpe0blklen);
+	acpiioalloc(fadt->gpe1blk, fadt->gpe1blklen);
 
 	initgpes();
 #ifdef CONFIG_WE_ARE_NOT_WORTHY
@@ -1789,14 +1824,14 @@ static struct chan *acpiattach(char *spec)
 	 * This starts ACPI, which may require we handle
 	 * power mgmt events ourselves. Use with care.
 	 */
-	outb(fadt.smicmd, fadt.acpienable);
+	outb(fadt->smicmd, fadt->acpienable);
 	for (i = 0; i < 10; i++)
 		if (getpm1ctl() & Pm1SciEn)
 			break;
 	if (i == 10)
 		error(EFAIL, "acpi: failed to enable\n");
-	if(fadt.sciint != 0)
-		intrenable(fadt.sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
+	if(fadt->sciint != 0)
+		intrenable(fadt->sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
 #endif
 	c = devattach(devname(), spec);
 	c->aux = root;
@@ -1870,7 +1905,7 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 	case Qpretty:
 		s = ttext;
 		e = ttext + tlen;
-		s = dumpfadt(s, e, &fadt);
+		s = dumpfadt(s, e, fadt);
 		s = dumpmadt(s, e, apics);
 		s = dumpslit(s, e, slit);
 		s = dumpsrat(s, e, srat);

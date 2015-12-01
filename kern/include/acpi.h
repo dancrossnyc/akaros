@@ -261,6 +261,8 @@ struct Sdthdr {
 /* Firmware control structure
  */
 struct Facs {
+	uint8_t sig[4];
+	uint8_t len[4];
 	uint32_t hwsig;
 	uint32_t wakingv;
 	uint32_t glock;
@@ -276,6 +278,8 @@ struct Msct {
 	int ndoms;					/* number of domains */
 	int nclkdoms;				/* number of clock domains */
 	uint64_t maxpa;				/* max physical address */
+	size_t nmdom;				/* number of discovered domains */
+	struct Mdom *dom;			/* array of domains */
 };
 
 struct Mdom {
