@@ -172,8 +172,8 @@ static void strlmove(char *dst, const void *src, size_t n)
 	dst[n - 1] = '\0';
 }
 
-static struct Atable *mkatable(int type, char *name, uint8_t *raw,
-                               size_t rawsize, size_t addsize)
+struct Atable *mkatable(int type, char *name, uint8_t *raw,
+                        size_t rawsize, size_t addsize)
 {
 	void *m;
 	struct Atable *t;
