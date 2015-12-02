@@ -1464,7 +1464,7 @@ static void parsexsdt(struct Atable *root)
 
 	memset(&slice, 0, sizeof(slice));
 	if (waserror()) {
-		free(slice.ptrs);
+		kfree(slice.ptrs);
 		return;
 	}
 
