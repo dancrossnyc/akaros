@@ -496,7 +496,7 @@ static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 	}
 	*n = l32get(sdt->length);
 	if (!*n) {
-		printk("sdt has zero length!\n");
+		printk("sdt has zero length: pa = %p, sig = %.4s\n", pa, sdt->sig);
 		return NULL;
 	}
 	if (cksum != 0 && sdtchecksum(sdt, *n) != 0) {
@@ -519,6 +519,7 @@ static int loadfacs(uintptr_t pa)
 {
 	size_t n;
 
+I_AM_HERE;
 	facs = sdtmap(pa, &n, 0);
 	if (facs == NULL) {
 		return -1;
@@ -544,6 +545,7 @@ static void loaddsdt(uintptr_t pa)
 	size_t n;
 	uint8_t *dsdtp;
 
+I_AM_HERE;
 	dsdtp = sdtmap(pa, &n, 1);
 	if (dsdtp == NULL) {
 		return;
@@ -1457,10 +1459,10 @@ static void parsexsdt(struct Atable *root)
 	struct Atable *table;
 	struct Slice slice;
 	ERRSTACK(1);
-	size_t l;
+	size_t l, end;
 	uintptr_t dhpa;
 	struct Atable *n;
-	void *tbl;
+	uint8_t *tbl;
 
 	memset(&slice, 0, sizeof(slice));
 	if (waserror()) {
@@ -1468,11 +1470,15 @@ static void parsexsdt(struct Atable *root)
 		return;
 	}
 
-	for (int i = 0; i < xsdt->len; i += xsdt->asize) {
-		dhpa = (xsdt->asize == 8) ? l64get(xsdt->p + i) : l32get(xsdt->p + i);
+	tbl = xsdt->p + sizeof(struct Sdthdr);
+	end = xsdt->len - sizeof(struct Sdthdr);
+	for (int i = 0; i < end; i += xsdt->asize) {
+		dhpa = (xsdt->asize == 8) ? l64get(tbl + i) : l32get(tbl + i);
+I_AM_HERE;
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
-		printd("acpi: %s addr %#p\n", tsig, sdt);
+		//printd("acpi: %s addr %#p\n", tsig, sdt);
+		printk("acpi: %.4s addr %#p\n", sdt->sig, sdt);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++)
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
@@ -1545,6 +1551,7 @@ static void parsersdptr(void)
 	 * process the RSDT or XSDT table.
 	 */
 	xsdt = root->tbl;
+I_AM_HERE;
 	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
 		printk("acpi: sdtmap failed\n");
 		return;

@@ -244,7 +244,7 @@ struct Rsdp {
 	uint8_t length[4];
 	uint8_t xaddr[8];			/* XSDT */
 	uint8_t xchecksum;			/* XSDT */
-	uint8_t _33_[3];			/* reserved */
+	uint8_t _reserved[3];			/* reserved */
 };
 
 /* Header for ACPI description tables
