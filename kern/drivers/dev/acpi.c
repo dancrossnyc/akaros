@@ -500,12 +500,12 @@ static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 		return NULL;
 	}
 	if (cksum != 0 && sdtchecksum(sdt, *n) != 0) {
-		printk("acpi: SDT: bad checksum\n");
+		printk("acpi: SDT: bad checksum. pa = %p, len = %lu\n", pa, *n);
 		return NULL;
 	}
 	p = kzmalloc(sizeof(struct Acpilist) + *n, KMALLOC_WAIT);
 	if (p == NULL) {
-		panic("sdtmap: memory allocation failed for %z bytes", *n);
+		panic("sdtmap: memory allocation failed for %lu bytes", *n);
 	}
 	memmove(p->raw, (void *)sdt, *n);
 	p->size = *n;
@@ -849,6 +849,7 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 	int i;
 	struct Srat *st;
 
+return NULL;
 	if (srat != NULL) {
 		panic("acpi: two SRATs?\n");
 	}
@@ -858,10 +859,11 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 	pe = p + rawsize;
 	for (p += 48, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
-		tt = mkatable(SRAT, buf, p, 48, sizeof(struct Srat));
+		stlen = p[1];
+printk("in srat parser, i = %d, p = %p, pe = %p, stlen = %d\n", i, p, pe, stlen);
+		tt = mkatable(SRAT, buf, p, stlen, sizeof(struct Srat));
 		st = tt->tbl;
 		st->type = p[0];
-		stlen = p[1];
 		switch (st->type) {
 			case SRlapic:
 				st->lapic.dom = p[2] | p[9] << 24 | p[10] << 16 | p[11] << 8;
@@ -1473,8 +1475,8 @@ static void parsexsdt(struct Atable *root)
 	tbl = xsdt->p + sizeof(struct Sdthdr);
 	end = xsdt->len - sizeof(struct Sdthdr);
 	for (int i = 0; i < end; i += xsdt->asize) {
+printk("acpi loop: i = %d, end = %d, xsdt->asize = %d\n", i, end, xsdt->asize);
 		dhpa = (xsdt->asize == 8) ? l64get(tbl + i) : l32get(tbl + i);
-I_AM_HERE;
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
 		//printd("acpi: %s addr %#p\n", tsig, sdt);
