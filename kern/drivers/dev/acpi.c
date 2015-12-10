@@ -849,6 +849,7 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 	int i;
 	struct Srat *st;
 
+printk("in parsesrat, p = %p, rawsize = %lu\n", p, rawsize);
 return NULL;
 	if (srat != NULL) {
 		panic("acpi: two SRATs?\n");
