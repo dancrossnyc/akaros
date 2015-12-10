@@ -1484,8 +1484,10 @@ printk("acpi loop: i = %d, end = %d, xsdt->asize = %d\n", i, end, xsdt->asize);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++)
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
-				table->parent = root;
-				append(&slice, table);
+				if (table != NULL) {
+					table->parent = root;
+					append(&slice, table);
+				}
 				break;
 			}
 	}
