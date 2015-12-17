@@ -180,7 +180,7 @@ struct Atable {
 	size_t nchildren;			/* count of this node's children */
 	struct Atable *next;		/* Pointer to the next sibling. */
 
-	size_t size;				/* Total size of raw table */
+	size_t rawsize;				/* Total size of raw table */
 	uint8_t *raw;				/* Raw data. */
 };
 

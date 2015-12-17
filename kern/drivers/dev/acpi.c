@@ -55,9 +55,9 @@ enum {
 	Qtbl,
 	Qpretty,
 	Qraw,
-
-	Atablesz = sizeof(struct Atable),
 };
+
+#define ATABLEBUFSZ ROUNDUP(sizeof(struct Atable), 16)
 
 static int lastPath = 1024;
 struct dev acpidevtab;
@@ -127,21 +127,50 @@ struct Slice {
 	size_t size;
 };
 
-void clear(struct Slice *slice)
+void slinit(struct Slice *slice)
+{
+	memset(slice, 0, sizeof(*slice));
+}
+
+void slclear(struct Slice *slice)
 {
 	slice->len = 0;
 	memset(slice->ptrs, 0, sizeof(*slice->ptrs) * slice->size);
+}
+
+void *slget(struct Slice *slice, size_t i)
+{
+	if (i >= slice->len)
+		return NULL;
+	return slice->ptrs[i];
+}
+
+void slput(struct Slice *slice, size_t i, void *p)
+{
+	if (i >= slice->len)
+		return;
+	slice->ptrs[i] = p;
+}
+
+void sldel(struct Slice *slice, size_t i)
+{
+	if (i >= slice->len)
+		return;
+	memmove(slice->ptrs + i, slice->ptrs + i + 1,
+	        (slice->len - i + 1) * sizeof(void *));
+	slice->len--;
 }
 
 void append(struct Slice *s, void *p)
 {
 	if (s->len == s->size) {
 		void **ps;
-		s->size *= 2;
 		if (s->size == 0)
-			s->size = 8;
+			s->size = 4;
+		s->size *= 2;
 		ps = kreallocarray(s->ptrs, s->size, sizeof(void *), KMALLOC_WAIT);
 		assert(ps != NULL);		/* XXX: if size*sizeof(void*) overflows. */
+		s->ptrs = ps;
 	}
 	s->ptrs[s->len] = p;
 	s->len++;
@@ -162,14 +191,12 @@ void *finalize(struct Slice *slice)
 	return ps;
 }
 
-/*
- * This is like strncpy, but always NUL terminates and doesn't zero pad (one
- * simply gets whatever was in src before).
- */
-static void strlmove(char *dst, const void *src, size_t n)
+void sldestroy(struct Slice *slice)
 {
-	memmove(dst, src, n - 1);
-	dst[n - 1] = '\0';
+	kfree(slice->ptrs);
+	slice->ptrs = NULL;
+	slice->size = 0;
+	slice->len = 0;
 }
 
 struct Atable *mkatable(int type, char *name, uint8_t *raw,
@@ -178,14 +205,14 @@ struct Atable *mkatable(int type, char *name, uint8_t *raw,
 	void *m;
 	struct Atable *t;
 
-	m = kzmalloc(Atablesz + addsize, KMALLOC_WAIT);
+	m = kzmalloc(ATABLEBUFSZ + addsize, KMALLOC_WAIT);
 	if (m == NULL)
 		panic("no memory for more aml tables");
 	t = m;
 	t->tbl = NULL;
 	if (addsize != 0)
-		t->tbl = m + Atablesz;
-	t->size = rawsize;
+		t->tbl = m + ATABLEBUFSZ;
+	t->rawsize = rawsize;
 	t->raw = raw;
 	strlcpy(t->name, name, sizeof(t->name));
 
@@ -193,6 +220,7 @@ struct Atable *mkatable(int type, char *name, uint8_t *raw,
 }
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g);
+static void dumpxsdt(void);
 
 static char *acpiregstr(int id)
 {
@@ -503,7 +531,9 @@ static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 		printk("acpi: SDT: bad checksum. pa = %p, len = %lu\n", pa, *n);
 		return NULL;
 	}
+dumpxsdt();
 	p = kzmalloc(sizeof(struct Acpilist) + *n, KMALLOC_WAIT);
+dumpxsdt();
 	if (p == NULL) {
 		panic("sdtmap: memory allocation failed for %lu bytes", *n);
 	}
@@ -519,7 +549,6 @@ static int loadfacs(uintptr_t pa)
 {
 	size_t n;
 
-I_AM_HERE;
 	facs = sdtmap(pa, &n, 0);
 	if (facs == NULL) {
 		return -1;
@@ -545,7 +574,6 @@ static void loaddsdt(uintptr_t pa)
 	size_t n;
 	uint8_t *dsdtp;
 
-I_AM_HERE;
 	dsdtp = sdtmap(pa, &n, 1);
 	if (dsdtp == NULL) {
 		return;
@@ -849,19 +877,16 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 	int i;
 	struct Srat *st;
 
-printk("in parsesrat, p = %p, rawsize = %lu\n", p, rawsize);
-return NULL;
 	if (srat != NULL) {
 		panic("acpi: two SRATs?\n");
 	}
 
 	t = mkatable(SRAT, name, p, rawsize, 0);
-	memset(&slice, 0, sizeof(slice));
+	slinit(&slice);
 	pe = p + rawsize;
 	for (p += 48, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
 		stlen = p[1];
-printk("in srat parser, i = %d, p = %p, pe = %p, stlen = %d\n", i, p, pe, stlen);
 		tt = mkatable(SRAT, buf, p, stlen, sizeof(struct Srat));
 		st = tt->tbl;
 		st->type = p[0];
@@ -911,7 +936,7 @@ printk("in srat parser, i = %d, p = %p, pe = %p, stlen = %d\n", i, p, pe, stlen)
 	t->nchildren = i;
 	t->children = finalize(&slice);
 	tail = NULL;
-	while (--i > 0) {
+	while (i-- > 0) {
 		t->children[i]->next = tail;
 		tail = t->children[i];
 	}
@@ -1119,12 +1144,13 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 	uint8_t *pe;
 	struct Madt *mt;
 	struct Apicst *st, *l;
-	int stlen, id;
+	int id;
+	size_t stlen;
 	char buf[16];
 	int i;
 	struct Slice slice;
 
-	memset(&slice, 0, sizeof(slice));
+	slinit(&slice);
 	t = mkatable(MADT, name, p, size, sizeof(struct Madt));
 	mt = t->tbl;
 	mt->lapicpa = l32get(p + 36);
@@ -1132,10 +1158,10 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 	pe = p + size;
 	for (p += 44, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
-		tt = mkatable(APIC, buf, p, 44, sizeof(struct Apicst));
+		stlen = p[1];
+		tt = mkatable(APIC, buf, p, stlen, sizeof(struct Apicst));
 		st = tt->tbl;
 		st->type = p[0];
-		stlen = p[1];
 		switch (st->type) {
 			case ASlapic:
 				st->lapic.pid = p[2];
@@ -1150,8 +1176,8 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 				st->ioapic.addr = l32get(p + 4);
 				st->ioapic.ibase = l32get(p + 8);
 				/* ioapic overrides any ioapic entry for the same id */
-				for (i = 0; i < len(&slice); i++) {
-					l = ((struct Atable *)slice.ptrs[i])->tbl;
+				for (int i = 0; i < len(&slice); i++) {
+					l = ((struct Atable *)slget(&slice, i))->tbl;
 					if (l->type == ASiosapic && l->iosapic.id == id) {
 						st->ioapic = l->iosapic;
 						/* we leave it linked; could be removed */
@@ -1184,8 +1210,8 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 				st->iosapic.ibase = l32get(p + 4);
 				st->iosapic.addr = l64get(p + 8);
 				/* iosapic overrides any ioapic entry for the same id */
-				for (i = 0; i < len(&slice); i++) {
-					l = ((struct Atable*)slice.ptrs[i])->tbl;
+				for (int i = 0; i < len(&slice); i++) {
+					l = ((struct Atable*)slget(&slice, i))->tbl;
 					if (l->type == ASioapic && l->ioapic.id == id) {
 						l->ioapic = st->iosapic;
 						kfree(tt);
@@ -1232,18 +1258,19 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 				kfree(tt);
 				tt = NULL;
 		}
-		if (tt != NULL)
+		if (tt != NULL) {
+			printk("appending to slice; len = %lu, tt->tbl = %p\n", len(&slice), tt->tbl);
 			append(&slice, tt);
+		}
 	}
 	i = len(&slice);
 	t->nchildren = i;
 	t->children = finalize(&slice);
 	tail = NULL;
-	while (--i > 0) {
+	while (i-- > 0) {
 		t->children[i]->next = tail;
 		tail = t->children[i];
 	}
-
 	return t;
 }
 
@@ -1356,9 +1383,8 @@ static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 	}
 	t = mkatable(SSDT, name, raw, size, 0);
 	h = (struct Sdthdr *)raw;
-	strlmove(t->name, h->sig, sizeof(h->sig) + 1);
-	t->raw = raw;
-	t->size = size;
+	memmove(t->name, h->sig, sizeof(h->sig));
+	t->name[sizeof(h->sig)] = '\0';
 
 	return t;
 }
@@ -1392,7 +1418,7 @@ static char *seprinttable(char *s, char *e, struct Atable *t)
 	int i, n;
 
 	p = (uint8_t *)t->tbl;	/* include header */
-	n = t->size;
+	n = t->rawsize;
 	s = seprintf(s, e, "%s @ %#p\n", t->name, p);
 	for (i = 0; i < n; i++) {
 		if ((i % 16) == 0)
@@ -1467,22 +1493,22 @@ static void parsexsdt(struct Atable *root)
 	struct Atable *n;
 	uint8_t *tbl;
 
-	memset(&slice, 0, sizeof(slice));
+	slinit(&slice);
 	if (waserror()) {
-		kfree(slice.ptrs);
+		sldestroy(&slice);
 		return;
 	}
 
 	tbl = xsdt->p + sizeof(struct Sdthdr);
 	end = xsdt->len - sizeof(struct Sdthdr);
 	for (int i = 0; i < end; i += xsdt->asize) {
-printk("acpi loop: i = %d, end = %d, xsdt->asize = %d\n", i, end, xsdt->asize);
 		dhpa = (xsdt->asize == 8) ? l64get(tbl + i) : l32get(tbl + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
 		//printd("acpi: %s addr %#p\n", tsig, sdt);
 		printk("acpi: %.4s addr %#p\n", sdt->sig, sdt);
-		for (int j = 0; j < ARRAY_SIZE(ptable); j++)
+printk("acpiloop: i = %d, end = %lu\n", i, end);
+		for (int j = 0; j < ARRAY_SIZE(ptable); j++) {
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
 				if (table != NULL) {
@@ -1491,6 +1517,7 @@ printk("acpi loop: i = %d, end = %d, xsdt->asize = %d\n", i, end, xsdt->asize);
 				}
 				break;
 			}
+		}
 	}
 	root->nchildren = len(&slice);
 	root->children = finalize(&slice);
@@ -1513,17 +1540,17 @@ static void parsersdptr(void)
 	/*
 	 * Handcraft the root of ACPI parse tree.
 	 */
-	root = kzmalloc(Atablesz + sizeof(struct Xsdt), KMALLOC_WAIT);
+	root = kzmalloc(ATABLEBUFSZ + 2*sizeof(struct Xsdt), KMALLOC_WAIT);
 	mkqid(&root->qid, Qroot, 0, Qdir);
 	root->type = XSDT;
-	root->tbl = root + sizeof(struct Atable);
+	root->tbl = root + ATABLEBUFSZ;
 	strlcpy(root->name, ".", sizeof(root->name));
 	root->parent = root;
 	root->next = NULL;
 	root->type = 0;
 	root->children = NULL;
 	root->nchildren = 0;
-	root->size = 0;
+	root->rawsize = 0;
 
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
 		   rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
@@ -1556,8 +1583,8 @@ static void parsersdptr(void)
 	 * process the RSDT or XSDT table.
 	 */
 	xsdt = root->tbl;
-I_AM_HERE;
-	if ((xsdt->p = sdtmap(sdtpa, &xsdt->len, 1)) == NULL) {
+	xsdt->p = sdtmap(sdtpa, &xsdt->len, 1);
+	if (xsdt->p == NULL) {
 		printk("acpi: sdtmap failed\n");
 		return;
 	}
@@ -1565,7 +1592,6 @@ I_AM_HERE;
 		|| memcmp(xsdt->p + 1, "SDT", 3) != 0) {
 		printd("acpi: xsdt sig: %c%c%c%c\n",
 		       xsdt->p[0], xsdt->p[1], xsdt->p[2], xsdt->p[3]);
-		kfree(xsdt->p);
 		xsdt = NULL;
 		return;
 	}
@@ -1607,8 +1633,17 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 		return -1;
 	devdir(c, a->qid, a->name, 0, eve, 0555, dp);
 	c->aux = a;
-	printk("REturning %d\n", 1);
 	return 1;
+}
+
+/*
+ * Print the contents of the XSDT.
+ */
+static void dumpxsdt()
+{
+	printk("xsdt: len = %lu, asize = %lu, p = %p\n",
+	       xsdt->len, xsdt->asize, xsdt->p);
+	hexdump((void*)xsdt - 128, sizeof(*xsdt) + 128);
 }
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g)
@@ -2072,7 +2107,7 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 
 static char *raw(struct Atable *atbl, char *start, char *end, void *unused_arg)
 {
-	size_t len = MIN(end - start, atbl->size);
+	size_t len = MIN(end - start, atbl->rawsize);
 	memmove(start, atbl->raw, len);
 	return start + len;
 }
