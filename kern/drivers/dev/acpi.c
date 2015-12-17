@@ -1256,10 +1256,8 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 				kfree(tt);
 				tt = NULL;
 		}
-		if (tt != NULL) {
-			printk("appending to slice; len = %lu, tt->tbl = %p\n", len(&slice), tt->tbl);
+		if (tt != NULL)
 			append(&slice, tt);
-		}
 	}
 	i = len(&slice);
 	t->nchildren = i;
