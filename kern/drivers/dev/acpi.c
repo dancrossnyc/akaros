@@ -531,9 +531,7 @@ static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 		printk("acpi: SDT: bad checksum. pa = %p, len = %lu\n", pa, *n);
 		return NULL;
 	}
-dumpxsdt();
 	p = kzmalloc(sizeof(struct Acpilist) + *n, KMALLOC_WAIT);
-dumpxsdt();
 	if (p == NULL) {
 		panic("sdtmap: memory allocation failed for %lu bytes", *n);
 	}
@@ -1505,9 +1503,7 @@ static void parsexsdt(struct Atable *root)
 		dhpa = (xsdt->asize == 8) ? l64get(tbl + i) : l32get(tbl + i);
 		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
 			continue;
-		//printd("acpi: %s addr %#p\n", tsig, sdt);
-		printk("acpi: %.4s addr %#p\n", sdt->sig, sdt);
-printk("acpiloop: i = %d, end = %lu\n", i, end);
+		printd("acpi: %s addr %#p\n", tsig, sdt);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++) {
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
@@ -1543,7 +1539,7 @@ static void parsersdptr(void)
 	root = kzmalloc(ATABLEBUFSZ + 2*sizeof(struct Xsdt), KMALLOC_WAIT);
 	mkqid(&root->qid, Qroot, 0, Qdir);
 	root->type = XSDT;
-	root->tbl = root + ATABLEBUFSZ;
+	root->tbl = (void *)root + ATABLEBUFSZ;
 	strlcpy(root->name, ".", sizeof(root->name));
 	root->parent = root;
 	root->next = NULL;
@@ -1643,7 +1639,6 @@ static void dumpxsdt()
 {
 	printk("xsdt: len = %lu, asize = %lu, p = %p\n",
 	       xsdt->len, xsdt->asize, xsdt->p);
-	hexdump((void*)xsdt - 128, sizeof(*xsdt) + 128);
 }
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g)
