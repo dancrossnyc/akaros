@@ -79,6 +79,9 @@ static void set_socket_ids(void)
  * apid_id. */
 static int find_numa_domain(int apic_id)
 {
+	if (srat == NULL)
+		return -1;
+
 	for (int i = 0; i < srat->nchildren; i++) {
 		struct Srat *temp = srat->children[i]->tbl;
 		if (temp != NULL && temp->type == SRlapic) {
@@ -93,6 +96,9 @@ static int find_numa_domain(int apic_id)
  * cpu_topology_info struct. */
 static void set_num_cores(void)
 {
+	if (srat == NULL)
+		return;
+
 	for (int i = 0; i < srat->nchildren; i++) {
 		struct Apicst *temp = apics->children[0]->tbl;
 		if (temp != NULL && temp->type == ASlapic)
@@ -107,10 +113,9 @@ static bool is_unique_numa(struct Srat *srat, struct Atable **tail,
 {
 	for (int i = begin; i < end; i++) {
 		struct Srat *st = tail[i]->tbl;
-		if (st->type == SRlapic) {
+		if (st->type == SRlapic)
 			if (srat->lapic.dom == st->lapic.dom)
 				return FALSE;
-		}
 	}
 	return TRUE;
 }
@@ -120,12 +125,17 @@ static bool is_unique_numa(struct Srat *srat, struct Atable **tail,
 static int get_num_numa(void)
 {
 	int numa = 0;
+
+	if (srat == NULL)
+		return 0;
+
 	for (int i = 0; i < srat->nchildren; i++) {
 		struct Srat *temp = srat->children[i]->tbl;
 		if (temp != NULL && temp->type == SRlapic)
 			if (is_unique_numa(temp, srat->children, i, srat->nchildren))
 				numa++;
 	}
+
 	return numa;
 }
 

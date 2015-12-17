@@ -938,6 +938,7 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 		t->children[i]->next = tail;
 		tail = t->children[i];
 	}
+	srat = t;
 
 	return t;
 }
@@ -1267,6 +1268,8 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 		t->children[i]->next = tail;
 		tail = t->children[i];
 	}
+	apics = t;
+
 	return t;
 }
 
