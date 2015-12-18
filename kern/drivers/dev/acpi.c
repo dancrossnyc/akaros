@@ -1927,6 +1927,7 @@ static struct chan *acpiattach(char *spec)
 #endif
 	c = devattach(devname(), spec);
 	c->aux = root;
+	assert(c->aux != NULL);
 	return c;
 }
 
