@@ -32,11 +32,8 @@
 /* -----------------------------------------------------------------------------
  * Basic ACPI device.
  *
- * The qid.Path will be made unique by incrementing lastPath. lastPath starts
- * at 1024, just for fun, and so we have lots of room for other things.
- *
- * Version, which is 32 bits, is used to store the ACPI ID, which is either 32,
- * 16, or 8 bits.
+ * The qid.Path will be made unique by incrementing lastpath. lastpath starts
+ * at Qroot.
  *
  * Qtbl will return a pointer to the Atable, which includes the signature, OEM
  * data, and so on.
@@ -49,17 +46,20 @@
  */
 enum {
 	Qroot = 0,
+	Qstart,
 
-	// versions, used as types. Paths won't do.
+	// The type is the qid.path mod NQtypes.
 	Qdir = 0,
-	Qtbl,
 	Qpretty,
 	Qraw,
+	Qtbl,
+	NQtypes,
 };
 
-#define ATABLEBUFSZ ROUNDUP(sizeof(struct Atable), 16)
+#define ATABLEBUFSZ	ROUNDUP(sizeof(struct Atable), 16)
 
-static int lastPath = 1024;
+static uint64_t lastpath;
+static struct Slice emptyslice;
 struct dev acpidevtab;
 
 static char *devname(void)
@@ -200,7 +200,7 @@ void sldestroy(struct Slice *slice)
 }
 
 struct Atable *mkatable(int type, char *name, uint8_t *raw,
-                        size_t rawsize, size_t addsize)
+						size_t rawsize, size_t addsize)
 {
 	void *m;
 	struct Atable *t;
@@ -215,6 +215,42 @@ struct Atable *mkatable(int type, char *name, uint8_t *raw,
 	t->rawsize = rawsize;
 	t->raw = raw;
 	strlcpy(t->name, name, sizeof(t->name));
+	mkqid(&t->qid, lastpath++, 0, DMDIR);
+	mkqid(&t->rqid, lastpath++, 0, 0);
+	mkqid(&t->pqid, lastpath++, 0, 0);
+	mkqid(&t->tqid, lastpath++, 0, 0);
+
+	return t;
+}
+
+static struct Atable *finatable(struct Atable *t, struct Slice *slice)
+{
+	size_t n;
+	struct Atable *tail;
+	struct dirtab *dirs;
+
+	n = len(slice);
+	t->nchildren = n;
+	t->children = finalize(slice);
+	dirs = kreallocarray(NULL, n + NQtypes, sizeof(struct dirtab),
+	                     KMALLOC_WAIT);
+	assert(dirs != NULL);
+	dirs[0] = (struct dirtab){ ".",      t->qid,   0, 0555 };
+	dirs[1] = (struct dirtab){ "pretty", t->pqid,  0, 0444 };
+	dirs[2] = (struct dirtab){ "raw",    t->rqid,  0, 0444 };
+	dirs[3] = (struct dirtab){ "table",  t->tqid,  0, 0444 };
+	for (size_t i = 0; i < n; i++) {
+		strlcpy(dirs[i + NQtypes].name, t->children[i]->name, KNAMELEN);
+		dirs[i + NQtypes].qid = t->children[i]->qid;
+		dirs[i + NQtypes].length = 0;
+		dirs[i + NQtypes].perm = 0555;
+	}
+	t->cdirs = dirs;
+	tail = NULL;
+	while (n-- > 0) {
+		t->children[n]->next = tail;
+		tail = t->children[n];
+	}
 
 	return t;
 }
@@ -736,6 +772,7 @@ static struct Atable *parsefadt(char *name, uint8_t *p, size_t rawsize)
 		loaddsdt(fp->xdsdt);
 	else
 		loaddsdt(fp->dsdt);
+	finatable(t, &emptyslice);
 
 	return t;
 }
@@ -797,6 +834,7 @@ static struct Atable *parsemsct(char *name, uint8_t *raw, size_t rawsize)
 		msct->dom[i].maxproc = l32get(r + 10);
 		msct->dom[i].maxmem = l64get(r + 14);
 	}
+	finatable(t, &emptyslice);
 
 	return t;
 }
@@ -930,17 +968,9 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 		if (tt != NULL)
 			append(&slice, tt);
 	}
-	i = len(&slice);
-	t->nchildren = i;
-	t->children = finalize(&slice);
-	tail = NULL;
-	while (i-- > 0) {
-		t->children[i]->next = tail;
-		tail = t->children[i];
-	}
-	srat = t;
+	srat = finatable(t, &slice);
 
-	return t;
+	return srat;
 }
 
 static char *dumpslit(char *start, char *end, struct Slit *sl)
@@ -1005,6 +1035,7 @@ static struct Atable *parseslit(char *name, uint8_t *raw, size_t rawsize)
 	for (i = 0; i < slit->rowlen; i++)
 		qsort(slit->e[i], slit->rowlen, sizeof(slit->e[0][0]), cmpslitent);
 #endif
+	finatable(t, &emptyslice);
 
 	return t;
 }
@@ -1260,17 +1291,9 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 		if (tt != NULL)
 			append(&slice, tt);
 	}
-	i = len(&slice);
-	t->nchildren = i;
-	t->children = finalize(&slice);
-	tail = NULL;
-	while (i-- > 0) {
-		t->children[i]->next = tail;
-		tail = t->children[i];
-	}
-	apics = t;
+	apics = finatable(t, &slice);
 
-	return t;
+	return apics;
 }
 
 /*
@@ -1328,7 +1351,7 @@ static struct Atable *parsedmar(char *name, uint8_t *raw, size_t rawsize)
 
 	t = mkatable(DMAR, name, raw, rawsize, 0);
 
-	return t;
+	return finatable(t, &emptyslice);
 
 #if 0
 	int i;
@@ -1385,7 +1408,7 @@ static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 	memmove(t->name, h->sig, sizeof(h->sig));
 	t->name[sizeof(h->sig)] = '\0';
 
-	return t;
+	return finatable(t, &emptyslice);
 }
 
 static char *dumptable(char *start, char *end, char *sig, uint8_t * p, int l)
@@ -1516,8 +1539,7 @@ static void parsexsdt(struct Atable *root)
 			}
 		}
 	}
-	root->nchildren = len(&slice);
-	root->children = finalize(&slice);
+	finatable(root, &slice);
 }
 
 static void parsersdptr(void)
@@ -1535,19 +1557,11 @@ static void parsersdptr(void)
 	}
 
 	/*
-	 * Handcraft the root of ACPI parse tree.
+	 * Initialize the root of ACPI parse tree.
 	 */
-	root = kzmalloc(ATABLEBUFSZ + 2*sizeof(struct Xsdt), KMALLOC_WAIT);
-	mkqid(&root->qid, Qroot, 0, Qdir);
-	root->type = XSDT;
-	root->tbl = (void *)root + ATABLEBUFSZ;
-	strlcpy(root->name, ".", sizeof(root->name));
+	lastpath = Qroot;
+	root = mkatable(XSDT, ".", NULL, 0, sizeof(struct Xsdt));
 	root->parent = root;
-	root->next = NULL;
-	root->type = 0;
-	root->children = NULL;
-	root->nchildren = 0;
-	root->rawsize = 0;
 
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
 		   rsd->signature, rsd->rchecksum, rsd->oemid, rsd->revision,
@@ -1595,42 +1609,36 @@ static void parsersdptr(void)
 	xsdt->asize = asize;
 	printd("acpi: XSDT %#p\n", xsdt);
 	parsexsdt(root);
-	/* xsdt is kept and not unmapped */
 }
 
 static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 				   int i, struct dir *dp)
 {
-	struct qid qid;
-	int el;
-	uint8_t *cp;
-	struct Atable *a = c->aux;
-	int ix;
+	struct Atable *a;
 
-	printk("name %s i %d\n", name, i);
-
-	if (i == DEVDOTDOT) {
-		devdir(c, a->parent->qid, devname(), 0, eve, 0555, dp);
+	a = c->aux;
+	assert(a != NULL);
+	if (c->qid.path == Qroot) {
+		if (i == DEVDOTDOT) {
+			c->aux = root;
+			devdir(c, root->qid, devname(), 0, eve, 0555, dp);
+			return 1;
+		}
+		if (0 <= i && i < (root->nchildren + 3))
+			c->aux = root->children[i];
+		return devgen(c, name, root->cdirs, root->nchildren + 3, i, dp);
+	}
+	if ((c->qid.path % 3) == 0 && i == DEVDOTDOT) {
+		char *name = a->parent->name;
+		if (a->parent == root)
+			name = devname();
+		c->aux = a->parent;
+		devdir(c, a->parent->qid, name, 0, eve, 0555, dp);
 		return 1;
 	}
-
-	// First is always '.'
-	if (i == 0) {
-		devdir(c, a->qid, ".", 0, eve, 0555, dp);
-		c->aux = a;
-		return 1;
-	}
-
-	for(ix = 1; (ix < i) && a; ix++) {
-		printk("a %p a->next %p\n", a, a->next);
-		a = a->next;
-	}
-	printk("ix is %d and a is %p\n", ix, a);
-	if (ix < i || !a)
-		return -1;
-	devdir(c, a->qid, a->name, 0, eve, 0555, dp);
-	c->aux = a;
-	return 1;
+	if (0 <= i && i < (a->nchildren + 3))
+		c->aux = a->children[i];
+	return devgen(c, name, a->cdirs, a->nchildren + 3, i, dp);
 }
 
 /*
@@ -1863,16 +1871,14 @@ static void acpiioalloc(unsigned int addr, int len)
 
 int acpiinit(void)
 {
-	/* this smicmd test implements 'run once' for now. */
-	if (fadt == NULL || fadt->smicmd == 0) {
-		//fmtinstall('G', Gfmt);
+	/* This implements 'run once' for now. */
+	if (root == NULL) {
 		parsersdptr();
-		if (fadt == NULL || fadt->smicmd == 0) {
+		if (root == NULL) {
 			return -1;
 		}
+		printk("ACPI initialized\n");
 	}
-
-	printk("ACPI initialized\n");
 	return 0;
 }
 
@@ -1927,17 +1933,17 @@ static struct chan *acpiattach(char *spec)
 static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 								int nname)
 {
-	return devwalk(c, nc, name, nname, 0, 0, acpigen);
+	return devwalk(c, nc, name, nname, NULL, 0, acpigen);
 }
 
 static int acpistat(struct chan *c, uint8_t * dp, int n)
 {
-	return devstat(c, dp, n, acpidir, ARRAY_SIZE(acpidir), acpigen);
+	return devstat(c, dp, n, NULL, 0, acpigen);
 }
 
 static struct chan *acpiopen(struct chan *c, int omode)
 {
-	return devopen(c, omode, acpidir, ARRAY_SIZE(acpidir), acpigen);
+	return devopen(c, omode, NULL, 0, acpigen);
 }
 
 static void acpiclose(struct chan *unused)
@@ -1961,7 +1967,7 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 	}
 	if (ttext == NULL)
 		error(ENOMEM, "acpiread: no memory");
-	q = c->qid.vers;
+	q = c->qid.path % 3;
 	switch (q) {
 	case Qdir:
 		printk("acpiread: 0x%x\n", c->qid.path);

@@ -171,12 +171,16 @@ enum {
  */
 struct Atable {
 	struct qid qid;             /* QID corresponding to this table. */
+	struct qid rqid;			/* This table's 'raw' QID. */
+	struct qid pqid;			/* This table's 'pretty' QID. */
+	struct qid tqid;			/* This table's 'table' QID. */
 	int type;					/* This table's type */
 	void *tbl;					/* pointer to the converted table, e.g. madt. */
 	char name[16];				/* name of this table */
 
 	struct Atable *parent;		/* Parent pointer */
 	struct Atable **children;	/* children of this node (an array). */
+	struct dirtab *cdirs;		/* child directory entries of this node. */
 	size_t nchildren;			/* count of this node's children */
 	struct Atable *next;		/* Pointer to the next sibling. */
 
