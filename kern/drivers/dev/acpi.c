@@ -1614,29 +1614,33 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 				   int i, struct dir *dp)
 {
 	struct Atable *a;
+	int r;
 
 	a = c->aux;
 	assert(a != NULL);
 	if (c->qid.path == Qroot) {
 		if (i == DEVDOTDOT) {
 			devdir(c, root->qid, devname(), 0, eve, 0555, dp);
+			c->aux = a;
 			return 1;
 		}
+		r = devgen(c, name, root->cdirs, root->nchildren + NQtypes, i, dp);
 		if (0 <= i && i < (root->nchildren + NQtypes))
 			c->aux = root->children[i];
-		return devgen(c, name, root->cdirs, root->nchildren + NQtypes, i, dp);
+		return r;
 	}
 	if ((c->qid.path % NQtypes) == 0 && i == DEVDOTDOT) {
 		char *name = a->parent->name;
 		if (a->parent == root)
 			name = devname();
-		c->aux = a->parent;
 		devdir(c, a->parent->qid, name, 0, eve, 0555, dp);
+		c->aux = a->parent;
 		return 1;
 	}
+	r = devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
 	if (0 <= i && i < (a->nchildren + NQtypes))
 		c->aux = a->children[i];
-	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
+	return r;
 }
 
 /*
