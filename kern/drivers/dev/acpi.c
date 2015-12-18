@@ -46,7 +46,6 @@
  */
 enum {
 	Qroot = 0,
-	Qstart,
 
 	// The type is the qid.path mod NQtypes.
 	Qdir = 0,
@@ -215,7 +214,7 @@ struct Atable *mkatable(int type, char *name, uint8_t *raw,
 	t->rawsize = rawsize;
 	t->raw = raw;
 	strlcpy(t->name, name, sizeof(t->name));
-	mkqid(&t->qid, lastpath++, 0, DMDIR);
+	mkqid(&t->qid,  lastpath++, 0, DMDIR);
 	mkqid(&t->rqid, lastpath++, 0, 0);
 	mkqid(&t->pqid, lastpath++, 0, 0);
 	mkqid(&t->tqid, lastpath++, 0, 0);
@@ -614,7 +613,7 @@ static void loaddsdt(uintptr_t pa)
 	}
 }
 
-static void gasget(struct Gas *gas, uint8_t * p)
+static void gasget(struct Gas *gas, uint8_t *p)
 {
 	gas->spc = p[0];
 	gas->len = p[1];
@@ -1411,7 +1410,7 @@ static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 	return finatable(t, &emptyslice);
 }
 
-static char *dumptable(char *start, char *end, char *sig, uint8_t * p, int l)
+static char *dumptable(char *start, char *end, char *sig, uint8_t *p, int l)
 {
 	int n, i;
 
@@ -1620,15 +1619,14 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 	assert(a != NULL);
 	if (c->qid.path == Qroot) {
 		if (i == DEVDOTDOT) {
-			c->aux = root;
 			devdir(c, root->qid, devname(), 0, eve, 0555, dp);
 			return 1;
 		}
-		if (0 <= i && i < (root->nchildren + 3))
+		if (0 <= i && i < (root->nchildren + NQtypes))
 			c->aux = root->children[i];
-		return devgen(c, name, root->cdirs, root->nchildren + 3, i, dp);
+		return devgen(c, name, root->cdirs, root->nchildren + NQtypes, i, dp);
 	}
-	if ((c->qid.path % 3) == 0 && i == DEVDOTDOT) {
+	if ((c->qid.path % NQtypes) == 0 && i == DEVDOTDOT) {
 		char *name = a->parent->name;
 		if (a->parent == root)
 			name = devname();
@@ -1636,9 +1634,9 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 		devdir(c, a->parent->qid, name, 0, eve, 0555, dp);
 		return 1;
 	}
-	if (0 <= i && i < (a->nchildren + 3))
+	if (0 <= i && i < (a->nchildren + NQtypes))
 		c->aux = a->children[i];
-	return devgen(c, name, a->cdirs, a->nchildren + 3, i, dp);
+	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
 }
 
 /*
@@ -1928,6 +1926,7 @@ static struct chan *acpiattach(char *spec)
 	c = devattach(devname(), spec);
 	c->aux = root;
 	assert(c->aux != NULL);
+	printk("returning a chan with non-NULL c->aux = %p\n", c->aux);
 	return c;
 }
 
@@ -1937,7 +1936,7 @@ static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 	return devwalk(c, nc, name, nname, NULL, 0, acpigen);
 }
 
-static int acpistat(struct chan *c, uint8_t * dp, int n)
+static int acpistat(struct chan *c, uint8_t *dp, int n)
 {
 	return devstat(c, dp, n, NULL, 0, acpigen);
 }
