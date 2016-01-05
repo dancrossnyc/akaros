@@ -162,6 +162,7 @@ void sldel(struct Slice *slice, size_t i)
 
 void append(struct Slice *s, void *p)
 {
+	assert(p != NULL);
 	if (s->len == s->size) {
 		void **ps;
 		if (s->size == 0)
@@ -1621,11 +1622,24 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 	if (c->qid.path == Qroot) {
 		if (i == DEVDOTDOT) {
 			devdir(c, root->qid, devname(), 0, eve, 0555, dp);
-			c->aux = a;
 			return 1;
 		}
 		r = devgen(c, name, root->cdirs, root->nchildren + NQtypes, i, dp);
-		if (0 <= i && i < (root->nchildren + NQtypes))
+		/*
+		 * The following stanza is clever enough that it deserves some
+		 * explanation.
+		 *
+		 * If 'i' is between 0 and NQtypes, it refers to a file associated
+		 * with the Atable referred to by c->aux. In this case, we leave
+		 * c->aux alone since we don't want to point to another Atable.  We
+		 * detect this by looking for a negative 'i' after we subtract NQtypes.
+		 *
+		 * If 'i - NQtypes' is in Z \isect [0,root->nchildren), it refers
+		 * to a subdirectory and we update c->aux to point to the associated
+		 * Atable.
+		 */
+		i -= NQtypes;
+		if (0 <= i && i < root->nchildren)
 			c->aux = root->children[i];
 		return r;
 	}
@@ -1638,7 +1652,11 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 		return 1;
 	}
 	r = devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
-	if (0 <= i && i < (a->nchildren + NQtypes))
+	/*
+	 * See the comment above for an explanation of this.
+	 */
+	i -= NQtypes;
+	if (0 <= i && i < a->nchildren)
 		c->aux = a->children[i];
 	return r;
 }
@@ -1866,7 +1884,7 @@ static void initgpes(void)
 static void acpiioalloc(unsigned int addr, int len)
 {
 	if (addr != 0) {
-		printk("Just TAKING port %016lx to %016lx\n", addr, addr + len);
+		if (0) printk("Just TAKING port %016lx to %016lx\n", addr, addr + len);
 		//ioalloc(addr, len, 0, "acpi");
 	}
 }
@@ -1930,7 +1948,6 @@ static struct chan *acpiattach(char *spec)
 	c = devattach(devname(), spec);
 	c->aux = root;
 	assert(c->aux != NULL);
-	printk("returning a chan with non-NULL c->aux = %p\n", c->aux);
 	return c;
 }
 
@@ -1974,7 +1991,6 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 	q = c->qid.path % 3;
 	switch (q) {
 	case Qdir:
-		printk("acpiread: 0x%x\n", c->qid.path);
 		return devdirread(c, a, n, 0, 0, acpigen);
 	case Qraw:
 		return readmem(off, a, n, ttext, tlen);
