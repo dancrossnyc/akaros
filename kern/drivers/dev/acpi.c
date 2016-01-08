@@ -53,12 +53,16 @@ enum {
 	Qraw,
 	Qtbl,
 	NQtypes,
+
+	QIndexShift = 8,
+	QIndexMask = (1<<QIndexShift)-1,
 };
 
 #define ATABLEBUFSZ	ROUNDUP(sizeof(struct Atable), 16)
 
 static uint64_t lastpath;
 static struct Slice emptyslice;
+static struct Atable **atableindex;
 struct dev acpidevtab;
 
 static char *devname(void)
@@ -77,10 +81,6 @@ static char *devname(void)
 static struct cmdtab ctls[] = {
 	{CMregion, "region", 6},
 	{CMgpe, "gpe", 3},
-};
-
-static struct dirtab acpidir[] = {
-	{".", {Qroot, 0, QTDIR}, 0, DMDIR | 0555},
 };
 
 static struct Facs *facs;		/* Firmware ACPI control structure */
@@ -199,7 +199,8 @@ void sldestroy(struct Slice *slice)
 	slice->len = 0;
 }
 
-struct Atable *mkatable(int type, char *name, uint8_t *raw,
+struct Atable *mkatable(struct Atable *parent,
+                        int type, char *name, uint8_t *raw,
 						size_t rawsize, size_t addsize)
 {
 	void *m;
@@ -209,16 +210,18 @@ struct Atable *mkatable(int type, char *name, uint8_t *raw,
 	if (m == NULL)
 		panic("no memory for more aml tables");
 	t = m;
+	t->parent = parent;
 	t->tbl = NULL;
 	if (addsize != 0)
 		t->tbl = m + ATABLEBUFSZ;
 	t->rawsize = rawsize;
 	t->raw = raw;
 	strlcpy(t->name, name, sizeof(t->name));
-	mkqid(&t->qid,  lastpath++, 0, DMDIR);
-	mkqid(&t->rqid, lastpath++, 0, 0);
-	mkqid(&t->pqid, lastpath++, 0, 0);
-	mkqid(&t->tqid, lastpath++, 0, 0);
+	mkqid(&t->qid,  (lastpath << QIndexShift) + Qdir, 0, DMDIR);
+	mkqid(&t->rqid, (lastpath << QIndexShift) + Qraw, 0, 0);
+	mkqid(&t->pqid, (lastpath << QIndexShift) + Qpretty, 0, 0);
+	mkqid(&t->tqid, (lastpath << QIndexShift) + Qtbl, 0, 0);
+	lastpath++;
 
 	return t;
 }
@@ -243,7 +246,7 @@ static struct Atable *finatable(struct Atable *t, struct Slice *slice)
 		strlcpy(dirs[i + NQtypes].name, t->children[i]->name, KNAMELEN);
 		dirs[i + NQtypes].qid = t->children[i]->qid;
 		dirs[i + NQtypes].length = 0;
-		dirs[i + NQtypes].perm = 0555;
+		dirs[i + NQtypes].perm = DMDIR | 0555;
 	}
 	t->cdirs = dirs;
 	tail = NULL;
@@ -692,12 +695,13 @@ static char *dumpfadt(char *start, char *end, struct Fadt *fp)
 	return start;
 }
 
-static struct Atable *parsefadt(char *name, uint8_t *p, size_t rawsize)
+static struct Atable *parsefadt(struct Atable *parent,
+								char *name, uint8_t *p, size_t rawsize)
 {
 	struct Atable *t;
 	struct Fadt *fp;
 
-	t = mkatable(FADT, name, p, rawsize, sizeof(struct Fadt));
+	t = mkatable(parent, FADT, name, p, rawsize, sizeof(struct Fadt));
 
 	if (rawsize < 116) {
 		printk("ACPI: unusually short FADT, aborting!\n");
@@ -804,7 +808,8 @@ static char *dumpmsct(char *start, char *end, struct Atable *table)
  * XXX: should perhaps update our idea of available memory.
  * Else we should remove this code.
  */
-static struct Atable *parsemsct(char *name, uint8_t *raw, size_t rawsize)
+static struct Atable *parsemsct(struct Atable *parent,
+                                char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
 	struct Msct *msct;
@@ -818,7 +823,7 @@ static struct Atable *parsemsct(char *name, uint8_t *raw, size_t rawsize)
 	nmdom = 0;
 	for (r = raw + off, re = raw + rawsize; r < re; r += 22)
 		nmdom++;
-	t = mkatable(MSCT, name, raw, rawsize,
+	t = mkatable(parent, MSCT, name, raw, rawsize,
 	             sizeof(struct Msct) + nmdom * sizeof(struct Mdom));
 	msct = t->tbl;
 	msct->ndoms = l32get(raw + 40) + 1;
@@ -902,7 +907,8 @@ static char *dumpsrat(char *start, char *end, struct Atable *table)
 	return start;
 }
 
-static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
+static struct Atable *parsesrat(struct Atable *parent,
+                                char *name, uint8_t *p, size_t rawsize)
 {
 
 	struct Atable *t, *tt, *tail;
@@ -917,13 +923,13 @@ static struct Atable *parsesrat(char *name, uint8_t *p, size_t rawsize)
 		panic("acpi: two SRATs?\n");
 	}
 
-	t = mkatable(SRAT, name, p, rawsize, 0);
+	t = mkatable(parent, SRAT, name, p, rawsize, 0);
 	slinit(&slice);
 	pe = p + rawsize;
 	for (p += 48, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
 		stlen = p[1];
-		tt = mkatable(SRAT, buf, p, stlen, sizeof(struct Srat));
+		tt = mkatable(t, SRAT, buf, p, stlen, sizeof(struct Srat));
 		st = tt->tbl;
 		st->type = p[0];
 		switch (st->type) {
@@ -998,7 +1004,8 @@ static int cmpslitent(void *v1, void *v2)
 	return se1->dist - se2->dist;
 }
 
-static struct Atable *parseslit(char *name, uint8_t *raw, size_t rawsize)
+static struct Atable *parseslit(struct Atable *parent,
+                                char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
 	uint8_t *r, *re;
@@ -1012,7 +1019,7 @@ static struct Atable *parseslit(char *name, uint8_t *raw, size_t rawsize)
 	addsize += rowlen * sizeof(struct SlEntry *);
 	addsize += sizeof(struct SlEntry) * rowlen * rowlen;
 
-	t = mkatable(SLIT, name, raw, rawsize, addsize);
+	t = mkatable(parent, SLIT, name, raw, rawsize, addsize);
 	slit = t->tbl;
 	slit->rowlen = rowlen;
 	p = (void *)slit + sizeof(*slit);
@@ -1168,7 +1175,8 @@ static char *dumpmadt(char *start, char *end, struct Atable *apics)
 	return start;
 }
 
-static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
+static struct Atable *parsemadt(struct Atable *parent,
+                                char *name, uint8_t *p, size_t size)
 {
 	struct Atable *t, *tt, *tail;
 	uint8_t *pe;
@@ -1181,7 +1189,7 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 	struct Slice slice;
 
 	slinit(&slice);
-	t = mkatable(MADT, name, p, size, sizeof(struct Madt));
+	t = mkatable(parent, MADT, name, p, size, sizeof(struct Madt));
 	mt = t->tbl;
 	mt->lapicpa = l32get(p + 36);
 	mt->pcat = l32get(p + 40);
@@ -1189,7 +1197,7 @@ static struct Atable *parsemadt(char *name, uint8_t *p, size_t size)
 	for (p += 44, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
 		stlen = p[1];
-		tt = mkatable(APIC, buf, p, stlen, sizeof(struct Apicst));
+		tt = mkatable(t, APIC, buf, p, stlen, sizeof(struct Apicst));
 		st = tt->tbl;
 		st->type = p[0];
 		switch (st->type) {
@@ -1345,11 +1353,12 @@ static int dtab(uint8_t *p, struct Dtab *dtab)
 	return len;
 }
 
-static struct Atable *parsedmar(char *name, uint8_t *raw, size_t rawsize)
+static struct Atable *parsedmar(struct Atable *parent,
+                                char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
 
-	t = mkatable(DMAR, name, raw, rawsize, 0);
+	t = mkatable(parent, DMAR, name, raw, rawsize, 0);
 
 	return finatable(t, &emptyslice);
 
@@ -1391,7 +1400,8 @@ static struct Atable *parsedmar(char *name, uint8_t *raw, size_t rawsize)
 /*
  * Map the table and keep it there.
  */
-static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
+static struct Atable *parsessdt(struct Atable *parent,
+                                char *name, uint8_t *raw, size_t size)
 {
 	struct Atable *t;
 	struct Sdthdr *h;
@@ -1403,7 +1413,7 @@ static struct Atable *parsessdt(char *name, uint8_t *raw, size_t size)
 	if (size < Sdthdrsz) {
 		return NULL;
 	}
-	t = mkatable(SSDT, name, raw, size, 0);
+	t = mkatable(parent, SSDT, name, raw, size, 0);
 	h = (struct Sdthdr *)raw;
 	memmove(t->name, h->sig, sizeof(h->sig));
 	t->name[sizeof(h->sig)] = '\0';
@@ -1485,7 +1495,8 @@ static void *rsdsearch(char *signature)
  */
 struct Parser {
 	char *sig;
-	struct Atable *(*parse)(char *name, uint8_t *raw, size_t rawsize);
+	struct Atable *(*parse)(struct Atable *parent,
+	                        char *name, uint8_t *raw, size_t rawsize);
 };
 
 
@@ -1530,9 +1541,8 @@ static void parsexsdt(struct Atable *root)
 		printd("acpi: %s addr %#p\n", tsig, sdt);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++) {
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
-				table = ptable[j].parse(ptable[j].sig, (void *)sdt, l);
+				table = ptable[j].parse(root, ptable[j].sig, (void *)sdt, l);
 				if (table != NULL) {
-					table->parent = root;
 					append(&slice, table);
 				}
 				break;
@@ -1540,6 +1550,18 @@ static void parsexsdt(struct Atable *root)
 		}
 	}
 	finatable(root, &slice);
+}
+
+void makeindex(struct Atable *root)
+{
+	uint64_t index;
+
+	if (root == NULL)
+		return;
+	index = root->qid.path >> QIndexShift;
+	atableindex[index] = root;
+	for (int k = 0; k < root->nchildren; k++)
+		makeindex(root->children[k]);
 }
 
 static void parsersdptr(void)
@@ -1560,7 +1582,7 @@ static void parsersdptr(void)
 	 * Initialize the root of ACPI parse tree.
 	 */
 	lastpath = Qroot;
-	root = mkatable(XSDT, ".", NULL, 0, sizeof(struct Xsdt));
+	root = mkatable(NULL, XSDT, devname(), NULL, 0, sizeof(struct Xsdt));
 	root->parent = root;
 
 	printd("/* RSDP */ struct Rsdp = {%08c, %x, %06c, %x, %p, %d, %p, %x}\n",
@@ -1609,56 +1631,47 @@ static void parsersdptr(void)
 	xsdt->asize = asize;
 	printd("acpi: XSDT %#p\n", xsdt);
 	parsexsdt(root);
+	atableindex = kreallocarray(NULL, lastpath, sizeof(struct Atable *),
+	                            KMALLOC_WAIT);
+	assert(atableindex != NULL);
+	makeindex(root);
 }
 
 static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 				   int i, struct dir *dp)
 {
 	struct Atable *a;
-	int r;
+	uint64_t ai;
 
-	a = c->aux;
+	ai = c->qid.path >> QIndexShift;
+	assert(ai < lastpath);
+	a = atableindex[ai];
 	assert(a != NULL);
-	if (c->qid.path == Qroot) {
-		if (i == DEVDOTDOT) {
-			devdir(c, root->qid, devname(), 0, eve, 0555, dp);
-			return 1;
-		}
-		r = devgen(c, name, root->cdirs, root->nchildren + NQtypes, i, dp);
-		/*
-		 * The following stanza is clever enough that it deserves some
-		 * explanation.
-		 *
-		 * If 'i' is between 0 and NQtypes, it refers to a file associated
-		 * with the Atable referred to by c->aux. In this case, we leave
-		 * c->aux alone since we don't want to point to another Atable.  We
-		 * detect this by looking for a negative 'i' after we subtract NQtypes.
-		 *
-		 * If 'i - NQtypes' is in Z \isect [0,root->nchildren), it refers
-		 * to a subdirectory and we update c->aux to point to the associated
-		 * Atable.
-		 */
-		i -= NQtypes;
-		if (0 <= i && i < root->nchildren)
-			c->aux = root->children[i];
-		return r;
-	}
-	if ((c->qid.path % NQtypes) == 0 && i == DEVDOTDOT) {
-		char *name = a->parent->name;
-		if (a->parent == root)
-			name = devname();
-		devdir(c, a->parent->qid, name, 0, eve, 0555, dp);
-		c->aux = a->parent;
+	if (i == DEVDOTDOT) {
+		assert((c->qid.path & QIndexMask) == Qdir);
+		devdir(c, a->parent->qid, a->parent->name, 0, eve, DMDIR|0555, dp);
 		return 1;
 	}
-	r = devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
-	/*
-	 * See the comment above for an explanation of this.
-	 */
-	i -= NQtypes;
-	if (0 <= i && i < a->nchildren)
-		c->aux = a->children[i];
-	return r;
+	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
+}
+
+static int acpisgen(struct chan *c, char *name, struct dirtab *tab, int ntab,
+				    int i, struct dir *dp)
+{
+	struct Atable *a;
+	uint64_t ai;
+
+	ai = c->qid.path >> QIndexShift;
+	assert(ai < lastpath);
+	a = atableindex[ai];
+	assert(a != NULL);
+	if (i == DEVDOTDOT) {
+		assert((c->qid.path & QIndexMask) == Qdir);
+		devdir(c, a->parent->qid, a->parent->name, 0, eve, DMDIR|0555, dp);
+		return 1;
+	}
+	a = a->parent;
+	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
 }
 
 /*
@@ -1946,8 +1959,6 @@ static struct chan *acpiattach(char *spec)
 		intrenable(fadt->sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
 #endif
 	c = devattach(devname(), spec);
-	c->aux = root;
-	assert(c->aux != NULL);
 	return c;
 }
 
@@ -1959,7 +1970,7 @@ static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 
 static int acpistat(struct chan *c, uint8_t *dp, int n)
 {
-	return devstat(c, dp, n, NULL, 0, acpigen);
+	return devstat(c, dp, n, NULL, 0, acpisgen);
 }
 
 static struct chan *acpiopen(struct chan *c, int omode)
@@ -1988,10 +1999,10 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 	}
 	if (ttext == NULL)
 		error(ENOMEM, "acpiread: no memory");
-	q = c->qid.path % 3;
+	q = c->qid.path & QIndexMask;
 	switch (q) {
 	case Qdir:
-		return devdirread(c, a, n, 0, 0, acpigen);
+		return devdirread(c, a, n, NULL, 0, acpigen);
 	case Qraw:
 		return readmem(off, a, n, ttext, tlen);
 		break;
