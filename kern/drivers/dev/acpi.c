@@ -217,7 +217,7 @@ struct Atable *mkatable(struct Atable *parent,
 	t->rawsize = rawsize;
 	t->raw = raw;
 	strlcpy(t->name, name, sizeof(t->name));
-	mkqid(&t->qid,  (lastpath << QIndexShift) + Qdir, 0, DMDIR);
+	mkqid(&t->qid,  (lastpath << QIndexShift) + Qdir, 0, QTDIR);
 	mkqid(&t->rqid, (lastpath << QIndexShift) + Qraw, 0, 0);
 	mkqid(&t->pqid, (lastpath << QIndexShift) + Qpretty, 0, 0);
 	mkqid(&t->tqid, (lastpath << QIndexShift) + Qtbl, 0, 0);
@@ -1637,40 +1637,29 @@ static void parsersdptr(void)
 	makeindex(root);
 }
 
+static struct Atable *genatable(struct chan *c)
+{
+	struct Atable *a;
+	uint64_t ai;
+
+	ai = c->qid.path >> QIndexShift;
+	assert(ai < lastpath);
+	a = atableindex[ai];
+	assert(a != NULL);
+
+	return a;
+}
+
 static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 				   int i, struct dir *dp)
 {
-	struct Atable *a;
-	uint64_t ai;
+	struct Atable *a = genatable(c);
 
-	ai = c->qid.path >> QIndexShift;
-	assert(ai < lastpath);
-	a = atableindex[ai];
-	assert(a != NULL);
 	if (i == DEVDOTDOT) {
 		assert((c->qid.path & QIndexMask) == Qdir);
 		devdir(c, a->parent->qid, a->parent->name, 0, eve, DMDIR|0555, dp);
 		return 1;
 	}
-	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
-}
-
-static int acpisgen(struct chan *c, char *name, struct dirtab *tab, int ntab,
-				    int i, struct dir *dp)
-{
-	struct Atable *a;
-	uint64_t ai;
-
-	ai = c->qid.path >> QIndexShift;
-	assert(ai < lastpath);
-	a = atableindex[ai];
-	assert(a != NULL);
-	if (i == DEVDOTDOT) {
-		assert((c->qid.path & QIndexMask) == Qdir);
-		devdir(c, a->parent->qid, a->parent->name, 0, eve, DMDIR|0555, dp);
-		return 1;
-	}
-	a = a->parent;
 	return devgen(c, name, a->cdirs, a->nchildren + NQtypes, i, dp);
 }
 
@@ -1970,7 +1959,16 @@ static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 
 static int acpistat(struct chan *c, uint8_t *dp, int n)
 {
-	return devstat(c, dp, n, NULL, 0, acpisgen);
+	struct Atable *a = genatable(c);
+	if (a == NULL)
+		return -1;
+	a = a->parent;
+	assert(a != NULL);
+	/*
+	 * Note that devstat hard-codes a test against the location of 'devgen',
+	 * so we pretty much have to pass it here.
+	 */
+	return devstat(c, dp, n, a->cdirs, a->nchildren + NQtypes, devgen);
 }
 
 static struct chan *acpiopen(struct chan *c, int omode)
