@@ -1962,7 +1962,8 @@ static int acpistat(struct chan *c, uint8_t *dp, int n)
 	struct Atable *a = genatable(c);
 	if (a == NULL)
 		return -1;
-	a = a->parent;
+	if (c->qid.type == QTDIR)
+		a = a->parent;
 	assert(a != NULL);
 	/*
 	 * Note that devstat hard-codes a test against the location of 'devgen',
