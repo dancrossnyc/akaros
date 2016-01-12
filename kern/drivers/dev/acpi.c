@@ -876,6 +876,8 @@ static char *dumpdmar(char *start, char *end, struct Dmar *dt)
 
 static char *dumpsrat(char *start, char *end, struct Atable *table)
 {
+	if (table == NULL)
+		return seprintf(start, end, "NO SRAT\n");
 	start = seprintf(start, end, "acpi: SRAT@%p:\n", table->tbl);
 	for (; table != NULL; table = table->next) {
 		struct Srat *st = table->tbl;
