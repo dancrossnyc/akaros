@@ -628,9 +628,8 @@ static void gasget(struct Gas *gas, uint8_t *p)
 
 static char *dumpfadt(char *start, char *end, struct Fadt *fp)
 {
-	if (2 == 0) {
-		return NULL;
-	}
+	if (fp == NULL)
+		return start;
 
 	start = seprintf(start, end, "acpi: FADT@%p\n", fp);
 	start = seprintf(start, end, "acpi: fadt: facs: $%p\n", fp->facs);
@@ -787,6 +786,7 @@ static char *dumpmsct(char *start, char *end, struct Atable *table)
 
 	if (!table)
 		return start;
+
 	msct = table->tbl;
 	if (!msct)
 		return start;
@@ -851,6 +851,7 @@ static char *dumpdmar(char *start, char *end, struct Dmar *dt)
 {
 	if (dmar == NULL)
 		return start;
+
 	start = seprintf(start, end, "acpi: DMAR@%p:\n", dt);
 	start = seprintf(start, end,
 			 "\tdmar: intr_remap %d haw %d entries %d\n",
@@ -881,6 +882,7 @@ static char *dumpsrat(char *start, char *end, struct Atable *table)
 	start = seprintf(start, end, "acpi: SRAT@%p:\n", table->tbl);
 	for (; table != NULL; table = table->next) {
 		struct Srat *st = table->tbl;
+		if (st == NULL) continue;
 		switch (st->type) {
 			case SRlapic:
 				start =
@@ -985,7 +987,7 @@ static char *dumpslit(char *start, char *end, struct Slit *sl)
 {
 	int i;
 
-	if (!sl)
+	if (sl == NULL)
 		return start;
 	start = seprintf(start, end, "acpi slit:\n");
 	for (i = 0; i < sl->rowlen * sl->rowlen; i++) {
@@ -1102,6 +1104,9 @@ static char *printiflags(char *start, char *end, int flags)
 static char *dumpmadt(char *start, char *end, struct Atable *apics)
 {
 	struct Madt *mt;
+
+	if (apics == NULL)
+		return start;
 
 	mt = apics->tbl;
 	if (mt == NULL) {
