@@ -750,8 +750,10 @@ static struct Atable *parsefadt(struct Atable *parent,
 	 * qemu gives us a 116 byte fadt, though i haven't seen any HW do that.
 	 * The right way to do this is to realloc the table and fake it out.
 	 */
-	if (rawsize < 244)
+	if (rawsize < 244) {
+		finatable(t, &emptyslice);
 		return t;
+	}
 
 	gasget(&fp->resetreg, p + 116);
 	fp->resetval = p[128];
@@ -975,8 +977,10 @@ static struct Atable *parsesrat(struct Atable *parent,
 				tt = NULL;
 				break;
 		}
-		if (tt != NULL)
+		if (tt != NULL) {
+			finatable(tt, &emptyslice);
 			append(&slice, tt);
+		}
 	}
 	srat = finatable(t, &slice);
 
@@ -1303,8 +1307,10 @@ static struct Atable *parsemadt(struct Atable *parent,
 				kfree(tt);
 				tt = NULL;
 		}
-		if (tt != NULL)
+		if (tt != NULL) {
+			finatable(tt, &emptyslice);
 			append(&slice, tt);
+		}
 	}
 	apics = finatable(t, &slice);
 
