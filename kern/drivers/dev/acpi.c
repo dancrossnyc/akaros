@@ -94,7 +94,7 @@ struct Atable *apics;			/* APIC info */
 struct Atable *srat;			/* System resource affinity used by physalloc */
 struct Dmar *dmar;
 static struct Slit *slit;		/* Sys locality info table used by scheduler */
-static struct Atable *msct;		/* Maximum system characteristics table */
+static struct Atable *mscttbl;		/* Maximum system characteristics table */
 static struct Reg *reg;			/* region used for I/O */
 static struct Gpe *gpes;		/* General purpose events */
 static int ngpes;
@@ -522,6 +522,7 @@ static int loadfacs(uintptr_t pa)
 	printd("acpi: facs: xwakingv: %#p\n", facs->xwakingv);
 	printd("acpi: facs: vers: %#p\n", facs->vers);
 	printd("acpi: facs: ospmflags: %#p\n", facs->ospmflags);
+
 	return 0;
 }
 
@@ -733,8 +734,8 @@ static struct Atable *parsemsct(struct Atable *parent,
                                 char *name, uint8_t *raw, size_t rawsize)
 {
 	struct Atable *t;
-	struct Msct *msct;
 	uint8_t *r, *re;
+	struct Msct *msct;
 	struct Mdom **stl, *st;
 	size_t off, nmdom;
 	int i;
@@ -761,6 +762,7 @@ static struct Atable *parsemsct(struct Atable *parent,
 		msct->dom[i].maxmem = l64get(r + 14);
 	}
 	finatable(t, &emptyslice);
+	mscttbl = t;
 
 	return t;
 }
@@ -1964,7 +1966,7 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 		s = dumpslit(s, e, slit);
 		s = dumpsrat(s, e, srat);
 		s = dumpdmar(s, e, dmar);
-		dumpmsct(s, e, msct);
+		dumpmsct(s, e, mscttbl);
 		return readstr(off, a, n, ttext);
 	default:
 		error(EINVAL, "WHAT? %d\n", q);
