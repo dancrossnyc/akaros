@@ -40,7 +40,6 @@ int mpacpi(int ncleft)
 	if (mpisabusno == -1)
 		mpisabusno = Nbus - 1;
 
-printk("in mpacpi\n");
 	if (apics == NULL)
 		return ncleft;
 	mt = apics->tbl;

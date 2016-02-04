@@ -221,7 +221,6 @@ static int acpi_make_rdt(int tbdf, int irq, int busno, int devno)
 	uint32_t lo;
 	int pol, edge_level, ioapic_nr, gsi_irq;
 
-printk("in acpi_make_rdt\n");
 	at = apics;
 	st = NULL;
 	for (int i = 0; i < at->nchildren; i++) {
