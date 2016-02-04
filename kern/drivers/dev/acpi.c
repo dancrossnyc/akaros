@@ -22,6 +22,7 @@
 #include <ip.h>
 #include <ns.h>
 #include <acpi.h>
+#include <slice.h>
 
 #include "../timers/hpet.h"
 
@@ -61,7 +62,7 @@ enum {
 #define ATABLEBUFSZ	ROUNDUP(sizeof(struct Atable), 16)
 
 static uint64_t lastpath;
-static struct Slice emptyslice;
+static struct slice emptyslice;
 static struct Atable **atableindex;
 struct dev acpidevtab;
 
@@ -117,88 +118,6 @@ struct Acpilist {
 
 static struct Acpilist *acpilists;
 
-/*
- * A tracking structure for growing lists of Atables during parsing.
- */
-struct Slice {
-	void **ptrs;
-	size_t len;
-	size_t size;
-};
-
-void slinit(struct Slice *slice)
-{
-	memset(slice, 0, sizeof(*slice));
-}
-
-void slclear(struct Slice *slice)
-{
-	slice->len = 0;
-	memset(slice->ptrs, 0, sizeof(*slice->ptrs) * slice->size);
-}
-
-void *slget(struct Slice *slice, size_t i)
-{
-	if (i >= slice->len)
-		return NULL;
-	return slice->ptrs[i];
-}
-
-void slput(struct Slice *slice, size_t i, void *p)
-{
-	if (i >= slice->len)
-		return;
-	slice->ptrs[i] = p;
-}
-
-void sldel(struct Slice *slice, size_t i)
-{
-	if (i >= slice->len)
-		return;
-	memmove(slice->ptrs + i, slice->ptrs + i + 1,
-	        (slice->len - i + 1) * sizeof(void *));
-	slice->len--;
-}
-
-void append(struct Slice *s, void *p)
-{
-	assert(p != NULL);
-	if (s->len == s->size) {
-		void **ps;
-		if (s->size == 0)
-			s->size = 4;
-		s->size *= 2;
-		ps = kreallocarray(s->ptrs, s->size, sizeof(void *), KMALLOC_WAIT);
-		assert(ps != NULL);		/* XXX: if size*sizeof(void*) overflows. */
-		s->ptrs = ps;
-	}
-	s->ptrs[s->len] = p;
-	s->len++;
-}
-
-size_t len(struct Slice *slice) { return slice->len; }
-
-void *finalize(struct Slice *slice)
-{
-	void **ps;
-
-	ps = kreallocarray(slice->ptrs, slice->len, sizeof(void *), KMALLOC_WAIT);
-	assert(ps != NULL);
-	slice->len = 0;
-	slice->size = 0;
-	slice->ptrs = NULL;
-
-	return ps;
-}
-
-void sldestroy(struct Slice *slice)
-{
-	kfree(slice->ptrs);
-	slice->ptrs = NULL;
-	slice->size = 0;
-	slice->len = 0;
-}
-
 struct Atable *mkatable(struct Atable *parent,
                         int type, char *name, uint8_t *raw,
 						size_t rawsize, size_t addsize)
@@ -226,15 +145,15 @@ struct Atable *mkatable(struct Atable *parent,
 	return t;
 }
 
-static struct Atable *finatable(struct Atable *t, struct Slice *slice)
+static struct Atable *finatable(struct Atable *t, struct slice *slice)
 {
 	size_t n;
 	struct Atable *tail;
 	struct dirtab *dirs;
 
-	n = len(slice);
+	n = slice_len(slice);
 	t->nchildren = n;
-	t->children = finalize(slice);
+	t->children = (struct Atable **)slice_finalize(slice);
 	dirs = kreallocarray(NULL, n + NQtypes, sizeof(struct dirtab),
 	                     KMALLOC_WAIT);
 	assert(dirs != NULL);
@@ -920,7 +839,7 @@ static struct Atable *parsesrat(struct Atable *parent,
 	struct Atable *t, *tt, *tail;
 	uint8_t *pe;
 	int stlen, flags;
-	struct Slice slice;
+	struct slice slice;
 	char buf[16];
 	int i;
 	struct Srat *st;
@@ -930,7 +849,7 @@ static struct Atable *parsesrat(struct Atable *parent,
 	}
 
 	t = mkatable(parent, SRAT, name, p, rawsize, 0);
-	slinit(&slice);
+	slice_init(&slice);
 	pe = p + rawsize;
 	for (p += 48, i = 0; p < pe; p += stlen, i++) {
 		snprintf(buf, sizeof(buf), "%d", i);
@@ -979,7 +898,7 @@ static struct Atable *parsesrat(struct Atable *parent,
 		}
 		if (tt != NULL) {
 			finatable(tt, &emptyslice);
-			append(&slice, tt);
+			slice_append(&slice, tt);
 		}
 	}
 	srat = finatable(t, &slice);
@@ -1197,9 +1116,9 @@ static struct Atable *parsemadt(struct Atable *parent,
 	size_t stlen;
 	char buf[16];
 	int i;
-	struct Slice slice;
+	struct slice slice;
 
-	slinit(&slice);
+	slice_init(&slice);
 	t = mkatable(parent, MADT, name, p, size, sizeof(struct Madt));
 	mt = t->tbl;
 	mt->lapicpa = l32get(p + 36);
@@ -1225,8 +1144,8 @@ static struct Atable *parsemadt(struct Atable *parent,
 				st->ioapic.addr = l32get(p + 4);
 				st->ioapic.ibase = l32get(p + 8);
 				/* ioapic overrides any ioapic entry for the same id */
-				for (int i = 0; i < len(&slice); i++) {
-					l = ((struct Atable *)slget(&slice, i))->tbl;
+				for (int i = 0; i < slice_len(&slice); i++) {
+					l = ((struct Atable *)slice_get(&slice, i))->tbl;
 					if (l->type == ASiosapic && l->iosapic.id == id) {
 						st->ioapic = l->iosapic;
 						/* we leave it linked; could be removed */
@@ -1259,8 +1178,8 @@ static struct Atable *parsemadt(struct Atable *parent,
 				st->iosapic.ibase = l32get(p + 4);
 				st->iosapic.addr = l64get(p + 8);
 				/* iosapic overrides any ioapic entry for the same id */
-				for (int i = 0; i < len(&slice); i++) {
-					l = ((struct Atable*)slget(&slice, i))->tbl;
+				for (int i = 0; i < slice_len(&slice); i++) {
+					l = ((struct Atable*)slice_get(&slice, i))->tbl;
 					if (l->type == ASioapic && l->ioapic.id == id) {
 						l->ioapic = st->iosapic;
 						kfree(tt);
@@ -1309,7 +1228,7 @@ static struct Atable *parsemadt(struct Atable *parent,
 		}
 		if (tt != NULL) {
 			finatable(tt, &emptyslice);
-			append(&slice, tt);
+			slice_append(&slice, tt);
 		}
 	}
 	apics = finatable(t, &slice);
@@ -1532,16 +1451,16 @@ static void parsexsdt(struct Atable *root)
 {
 	struct Sdthdr *sdt;
 	struct Atable *table;
-	struct Slice slice;
+	struct slice slice;
 	ERRSTACK(1);
 	size_t l, end;
 	uintptr_t dhpa;
 	struct Atable *n;
 	uint8_t *tbl;
 
-	slinit(&slice);
+	slice_init(&slice);
 	if (waserror()) {
-		sldestroy(&slice);
+		slice_destroy(&slice);
 		return;
 	}
 
@@ -1556,7 +1475,7 @@ static void parsexsdt(struct Atable *root)
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(root, ptable[j].sig, (void *)sdt, l);
 				if (table != NULL) {
-					append(&slice, table);
+					slice_append(&slice, table);
 				}
 				break;
 			}
