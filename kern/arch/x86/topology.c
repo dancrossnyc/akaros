@@ -96,11 +96,11 @@ static int find_numa_domain(int apic_id)
  * cpu_topology_info struct. */
 static void set_num_cores(void)
 {
-	if (srat == NULL)
+	if (apics == NULL)
 		return;
 
-	for (int i = 0; i < srat->nchildren; i++) {
-		struct Apicst *temp = apics->children[0]->tbl;
+	for (int i = 0; i < apics->nchildren; i++) {
+		struct Apicst *temp = apics->children[i]->tbl;
 		if (temp != NULL && temp->type == ASlapic)
 			num_cores++;
 	}
