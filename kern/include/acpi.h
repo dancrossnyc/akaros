@@ -505,6 +505,12 @@ struct Dmar {
 
 extern uintptr_t acpimblocksize(uintptr_t, int *);
 
+struct Atable *mkatable(struct Atable *parent,
+                        int type, char *name, uint8_t *raw,
+                        size_t rawsize, size_t addsize);
+struct slice;
+struct Atable *finatable(struct Atable *t, struct slice *slice);
+struct Atable *finatable_nochildren(struct Atable *t);
 int acpiinit(void);
 extern struct Atable *apics;
 extern struct Atable *srat;

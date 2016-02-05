@@ -20,13 +20,14 @@ static inline uint64_t hpet_r64(uintptr_t reg)
 	return *((volatile uint64_t*)reg);
 }
 
-struct Atable *acpihpet(char *name, uint8_t *raw, size_t rawsize)
+struct Atable *parsehpet(struct Atable *parent,
+                         char *name, uint8_t *raw, size_t rawsize)
 {
 	/* Do we want to keep this table around?  if so, we can use newtable, which
 	 * allocs an Atable and puts it on a global stailq.  then we return that
 	 * pointer, not as an addr, but as a signal to parse code about whether or
 	 * not it is safe to unmap (which we don't do anymore). */
-	struct Atable *hpet = mkatable(HPET, "HPET", raw, rawsize, 0);
+	struct Atable *hpet = mkatable(parent, HPET, "HPET", raw, rawsize, 0);
 	unsigned long hp_addr;
 	uint32_t evt_blk_id;
 	int nr_timers;
@@ -52,7 +53,8 @@ struct Atable *acpihpet(char *name, uint8_t *raw, size_t rawsize)
 	 * HPET registers with reserved fields.*/
 	hpet_w64(hp_addr + 0x10, hpet_r64(hp_addr + 0x10) & ~0x3);
 	printk("Disabled the HPET timer\n");
-	return hpet;
+
+	return finatable_nochildren(hpet);
 }
 
 void cmos_dumping_ground()

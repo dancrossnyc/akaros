@@ -120,7 +120,7 @@ static struct Acpilist *acpilists;
 
 struct Atable *mkatable(struct Atable *parent,
                         int type, char *name, uint8_t *raw,
-						size_t rawsize, size_t addsize)
+                        size_t rawsize, size_t addsize)
 {
 	void *m;
 	struct Atable *t;
@@ -145,7 +145,7 @@ struct Atable *mkatable(struct Atable *parent,
 	return t;
 }
 
-static struct Atable *finatable(struct Atable *t, struct slice *slice)
+struct Atable *finatable(struct Atable *t, struct slice *slice)
 {
 	size_t n;
 	struct Atable *tail;
@@ -175,6 +175,11 @@ static struct Atable *finatable(struct Atable *t, struct slice *slice)
 	}
 
 	return t;
+}
+
+struct Atable *finatable_nochildren(struct Atable *t)
+{
+	return finatable(t, &emptyslice);
 }
 
 static char *dumpGas(char *start, char *end, char *prefix, struct Gas *g);
@@ -671,8 +676,7 @@ static struct Atable *parsefadt(struct Atable *parent,
 	 * The right way to do this is to realloc the table and fake it out.
 	 */
 	if (rawsize < 244) {
-		finatable(t, &emptyslice);
-		return t;
+		return finatable_nochildren(t);
 	}
 
 	gasget(&fp->resetreg, p + 116);
@@ -697,9 +701,8 @@ static struct Atable *parsefadt(struct Atable *parent,
 		loaddsdt(fp->xdsdt);
 	else
 		loaddsdt(fp->dsdt);
-	finatable(t, &emptyslice);
 
-	return t;
+	return finatable_nochildren(t);
 }
 
 static char *dumpmsct(char *start, char *end, struct Atable *table)
@@ -761,10 +764,9 @@ static struct Atable *parsemsct(struct Atable *parent,
 		msct->dom[i].maxproc = l32get(r + 10);
 		msct->dom[i].maxmem = l64get(r + 14);
 	}
-	finatable(t, &emptyslice);
-	mscttbl = t;
+	mscttbl = finatable_nochildren(t);
 
-	return t;
+	return mscttbl;
 }
 
 static char *dmartype[] = {"DRHD", "RMRR", "ATSR", "RHSA", "ANDD", };
@@ -899,7 +901,7 @@ static struct Atable *parsesrat(struct Atable *parent,
 				break;
 		}
 		if (tt != NULL) {
-			finatable(tt, &emptyslice);
+			finatable_nochildren(tt);
 			slice_append(&slice, tt);
 		}
 	}
@@ -971,9 +973,8 @@ static struct Atable *parseslit(struct Atable *parent,
 	for (i = 0; i < slit->rowlen; i++)
 		qsort(slit->e[i], slit->rowlen, sizeof(slit->e[0][0]), cmpslitent);
 #endif
-	finatable(t, &emptyslice);
 
-	return t;
+	return finatable_nochildren(t);
 }
 
 uintptr_t acpimblocksize(uintptr_t addr, int *dom)
@@ -1229,7 +1230,7 @@ static struct Atable *parsemadt(struct Atable *parent,
 				tt = NULL;
 		}
 		if (tt != NULL) {
-			finatable(tt, &emptyslice);
+			finatable_nochildren(tt);
 			slice_append(&slice, tt);
 		}
 	}
@@ -1294,7 +1295,7 @@ static struct Atable *parsedmar(struct Atable *parent,
 
 	t = mkatable(parent, DMAR, name, raw, rawsize, 0);
 
-	return finatable(t, &emptyslice);
+	return finatable_nochildren(t);
 
 #if 0
 	int i;
@@ -1352,7 +1353,7 @@ static struct Atable *parsessdt(struct Atable *parent,
 	memmove(t->name, h->sig, sizeof(h->sig));
 	t->name[sizeof(h->sig)] = '\0';
 
-	return finatable(t, &emptyslice);
+	return finatable_nochildren(t);
 }
 
 static char *dumptable(char *start, char *end, char *sig, uint8_t *p, int l)
@@ -1442,7 +1443,7 @@ static struct Parser ptable[] = {
 	{"SLIT", parseslit},
 	{"MSCT", parsemsct},
 	{"SSDT", parsessdt},
-//	{"HPET", acpihpet},
+	{"HPET", parsehpet},
 };
 
 /*

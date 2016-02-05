@@ -2,4 +2,5 @@
 
 #include <acpi.h>
 
-struct Atable *acpihpet(char *name, uint8_t *p, size_t rawsize);
+struct Atable *parsehpet(struct Atable *parent,
+                         char *name, uint8_t *p, size_t rawsize);
