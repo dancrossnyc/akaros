@@ -189,9 +189,8 @@ static char *acpiregstr(int id)
 {
 	static char buf[20];		/* BUG */
 
-	if (id >= 0 && id < ARRAY_SIZE(regnames)) {
+	if (id >= 0 && id < ARRAY_SIZE(regnames))
 		return regnames[id];
-	}
 	seprintf(buf, buf + sizeof(buf), "spc:%#x", id);
 	return buf;
 }
@@ -495,9 +494,8 @@ static void *sdtmap(uintptr_t pa, size_t *n, int cksum)
 		return NULL;
 	}
 	p = kzmalloc(sizeof(struct Acpilist) + *n, KMALLOC_WAIT);
-	if (p == NULL) {
+	if (p == NULL)
 		panic("sdtmap: memory allocation failed for %lu bytes", *n);
-	}
 	memmove(p->raw, (void *)sdt, *n);
 	p->size = *n;
 	p->next = acpilists;
@@ -511,9 +509,8 @@ static int loadfacs(uintptr_t pa)
 	size_t n;
 
 	facs = sdtmap(pa, &n, 0);
-	if (facs == NULL) {
+	if (facs == NULL)
 		return -1;
-	}
 	if (memcmp(facs->sig, "FACS", 4) != 0) {
 		facs = NULL;
 		return -1;
@@ -537,9 +534,8 @@ static void loaddsdt(uintptr_t pa)
 	uint8_t *dsdtp;
 
 	dsdtp = sdtmap(pa, &n, 1);
-	if (dsdtp == NULL) {
+	if (dsdtp == NULL)
 		return;
-	}
 }
 
 static void gasget(struct Gas *gas, uint8_t *p)
@@ -675,9 +671,8 @@ static struct Atable *parsefadt(struct Atable *parent,
 	 * qemu gives us a 116 byte fadt, though i haven't seen any HW do that.
 	 * The right way to do this is to realloc the table and fake it out.
 	 */
-	if (rawsize < 244) {
+	if (rawsize < 244)
 		return finatable_nochildren(t);
-	}
 
 	gasget(&fp->resetreg, p + 116);
 	fp->resetval = p[128];
@@ -721,6 +716,7 @@ static char *dumpmsct(char *start, char *end, struct Atable *table)
 	for (int i = 0; i < table->nchildren; i++) {
 		struct Atable *domtbl = table->children[i]->tbl;
 		struct Mdom *st = domtbl->tbl;
+
 		start = seprintf(start, end, "\t[%d:%d] %d maxproc %#p maxmmem\n",
 						 st->start, st->end, st->maxproc, st->maxmem);
 	}
@@ -784,6 +780,7 @@ static char *dumpdmar(char *start, char *end, struct Atable *dmar)
 	for (int i = 0; i < dmar->nchildren; i++) {
 		struct Atable *at = dmar->children[i];
 		struct Drhd *drhd = at->tbl;
+
 		start = seprintf(start, end, "\tDRHD: ");
 		start = seprintf(start, end, "%s 0x%02x 0x%016x\n",
 		                 drhd->all & 1 ? "INCLUDE_PCI_ALL" : "Scoped",
@@ -800,7 +797,9 @@ static char *dumpsrat(char *start, char *end, struct Atable *table)
 	start = seprintf(start, end, "acpi: SRAT@%p:\n", table->tbl);
 	for (; table != NULL; table = table->next) {
 		struct Srat *st = table->tbl;
-		if (st == NULL) continue;
+
+		if (st == NULL)
+			continue;
 		switch (st->type) {
 			case SRlapic:
 				start =
@@ -841,9 +840,8 @@ static struct Atable *parsesrat(struct Atable *parent,
 	int i;
 	struct Srat *st;
 
-	if (srat != NULL) {
+	if (srat != NULL)
 		panic("acpi: two SRATs?\n");
-	}
 
 	t = mkatable(parent, SRAT, name, p, rawsize, 0);
 	slice_init(&slice);
@@ -956,6 +954,7 @@ static struct Atable *parseslit(struct Atable *parent,
 	for (i = 0, r = raw + 44, re = raw + rawsize; r < re; r++, i++) {
 		int j = i / rowlen;
 		int k = i % rowlen;
+
 		se = &slit->e[j][k];
 		se->dom = k;
 		se->dist = *r;
@@ -976,6 +975,7 @@ uintptr_t acpimblocksize(uintptr_t addr, int *dom)
 
 	for (tl = srat; tl != NULL; tl = tl->next) {
 		struct Srat *sl = tl->tbl;
+
 		if (sl->type == SRmem)
 			if (sl->mem.addr <= addr && sl->mem.addr + sl->mem.len > addr) {
 				*dom = sl->mem.dom;
@@ -991,9 +991,8 @@ int pickcore(int mycolor, int index)
 	int color;
 	int ncorepercol;
 
-	if (slit == NULL) {
+	if (slit == NULL)
 		return 0;
-	}
 	ncorepercol = num_cores / slit->rowlen;
 	color = slit->e[mycolor][index / ncorepercol].dom;
 	return color * ncorepercol + index % ncorepercol;
@@ -1028,14 +1027,14 @@ static char *dumpmadt(char *start, char *end, struct Atable *apics)
 		return start;
 
 	mt = apics->tbl;
-	if (mt == NULL) {
+	if (mt == NULL)
 		return seprintf(start, end, "acpi: no MADT");
-	}
 	start = seprintf(start, end, "acpi: MADT@%p: lapic paddr %p pcat %d:\n",
 	                 mt, mt->lapicpa, mt->pcat);
 	for (int i = 0; i < apics->nchildren; i++) {
 		struct Atable *apic = apics->children[i];
 		struct Apicst *st = apic->tbl;
+
 		switch (st->type) {
 			case ASlapic:
 				start =
@@ -1268,7 +1267,10 @@ static struct Atable *parsedmar(struct Atable *parent,
 		snprintf(buf, sizeof(buf), "%d", i);
 		dslen = l16get(raw + off + 2);
 		type = l16get(raw + off);
-		if (type != 0)				// type == 0 => DRHD.
+		// TODO(dcross): Introduce sensible symbolic constants
+		// for DMAR entry types. For right now, type 0 => DRHD.
+		// We skip everything else.
+		if (type != 0)
 			continue;
 		npath = 0;
 		nscope = 0;
@@ -1290,8 +1292,9 @@ static struct Atable *parsedmar(struct Atable *parent,
 		pathp = (void *)drhd +
 		    sizeof(struct Drhd) + nscope * sizeof(struct DevScope);
 		for (int i = 0, o = off + 16; i < nscope; i++) {
-			dhlen = *(raw + o + 1);
 			struct DevScope *ds = &drhd->scopes[i];
+
+			dhlen = *(raw + o + 1);
 			ds->enumeration_id = *(raw + o + 4);
 			ds->start_bus_number = *(raw + o + 5);
 			ds->npath = (dhlen - 6) / 2;
@@ -1327,9 +1330,8 @@ static struct Atable *parsessdt(struct Atable *parent,
 	 * We found it and it is too small.
 	 * Simply return with no side effect.
 	 */
-	if (size < Sdthdrsz) {
+	if (size < Sdthdrsz)
 		return NULL;
-	}
 	t = mkatable(parent, SSDT, name, raw, size, 0);
 	h = (struct Sdthdr *)raw;
 	memmove(t->name, h->sig, sizeof(h->sig));
@@ -1434,10 +1436,10 @@ static struct Parser ptable[] = {
  */
 static void parsexsdt(struct Atable *root)
 {
+	ERRSTACK(1);
 	struct Sdthdr *sdt;
 	struct Atable *table;
 	struct slice slice;
-	ERRSTACK(1);
 	size_t l, end;
 	uintptr_t dhpa;
 	struct Atable *n;
@@ -1453,15 +1455,15 @@ static void parsexsdt(struct Atable *root)
 	end = xsdt->len - sizeof(struct Sdthdr);
 	for (int i = 0; i < end; i += xsdt->asize) {
 		dhpa = (xsdt->asize == 8) ? l64get(tbl + i) : l32get(tbl + i);
-		if ((sdt = sdtmap(dhpa, &l, 1)) == NULL)
+		sdt = sdtmap(dhpa, &l, 1);
+		if (sdt == NULL)
 			continue;
 		printd("acpi: %s addr %#p\n", tsig, sdt);
 		for (int j = 0; j < ARRAY_SIZE(ptable); j++) {
 			if (memcmp(sdt->sig, ptable[j].sig, sizeof(sdt->sig)) == 0) {
 				table = ptable[j].parse(root, ptable[j].sig, (void *)sdt, l);
-				if (table != NULL) {
+				if (table != NULL)
 					slice_append(&slice, table);
-				}
 				break;
 			}
 		}
@@ -1490,7 +1492,8 @@ static void parsersdptr(void)
 	static_assert(sizeof(struct Sdthdr) == 36);
 
 	/* Find the root pointer. */
-	if ((rsd = rsdsearch("RSD PTR ")) == NULL) {
+	rsd = rsdsearch("RSD PTR ");
+	if (rsd == NULL) {
 		printk("NO RSDP\n");
 		return;
 	}
@@ -1583,7 +1586,7 @@ static int acpigen(struct chan *c, char *name, struct dirtab *tab, int ntab,
 /*
  * Print the contents of the XSDT.
  */
-static void dumpxsdt()
+static void dumpxsdt(void)
 {
 	printk("xsdt: len = %lu, asize = %lu, p = %p\n",
 	       xsdt->len, xsdt->asize, xsdt->p);
@@ -1802,10 +1805,8 @@ static void initgpes(void)
 
 static void acpiioalloc(unsigned int addr, int len)
 {
-	if (addr != 0) {
-		if (0) printk("Just TAKING port %016lx to %016lx\n", addr, addr + len);
-		//ioalloc(addr, len, 0, "acpi");
-	}
+	if (addr != 0)
+		printd("Just TAKING port %016lx to %016lx\n", addr, addr + len);
 }
 
 int acpiinit(void)
@@ -1813,9 +1814,8 @@ int acpiinit(void)
 	/* This implements 'run once' for now. */
 	if (root == NULL) {
 		parsersdptr();
-		if (root == NULL) {
+		if (root == NULL)
 			return -1;
-		}
 		printk("ACPI initialized\n");
 	}
 	return 0;
@@ -1861,10 +1861,11 @@ static struct chan *acpiattach(char *spec)
 			break;
 	if (i == 10)
 		error(EFAIL, "acpi: failed to enable\n");
-	if(fadt->sciint != 0)
+	if (fadt->sciint != 0)
 		intrenable(fadt->sciint, acpiintr, 0, BUSUNKNOWN, "acpi");
 #endif
 	c = devattach(devname(), spec);
+
 	return c;
 }
 
@@ -1877,6 +1878,7 @@ static struct walkqid *acpiwalk(struct chan *c, struct chan *nc, char **name,
 static int acpistat(struct chan *c, uint8_t *dp, int n)
 {
 	struct Atable *a = genatable(c);
+
 	if (a == NULL)
 		return -1;
 	if (c->qid.type == QTDIR)
@@ -1886,6 +1888,7 @@ static int acpistat(struct chan *c, uint8_t *dp, int n)
 	 * Note that devstat hard-codes a test against the location of 'devgen',
 	 * so we pretty much have to pass it here.
 	 */
+
 	return devstat(c, dp, n, a->cdirs, a->nchildren + NQtypes, devgen);
 }
 
@@ -1921,7 +1924,6 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 		return devdirread(c, a, n, NULL, 0, acpigen);
 	case Qraw:
 		return readmem(off, a, n, ttext, tlen);
-		break;
 	case Qtbl:
 		s = ttext;
 		e = ttext + tlen;
@@ -1955,6 +1957,7 @@ static long acpiread(struct chan *c, void *a, long n, int64_t off)
 		error(EINVAL, "WHAT? %d\n", q);
 	}
 	error(EPERM, ERROR_FIXME);
+
 	return -1;
 }
 
@@ -2057,7 +2060,9 @@ static char *pretty(struct Atable *atbl, char *start, char *end, void *arg)
 static char *raw(struct Atable *atbl, char *start, char *end, void *unused_arg)
 {
 	size_t len = MIN(end - start, atbl->rawsize);
+
 	memmove(start, atbl->raw, len);
+
 	return start + len;
 }
 
