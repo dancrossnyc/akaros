@@ -92,7 +92,7 @@ static struct Atable *tfirst;	/* loaded DSDT/SSDT/... tables */
 static struct Atable *tlast;	/* pointer to last table */
 struct Atable *apics;			/* APIC info */
 struct Atable *srat;			/* System resource affinity used by physalloc */
-struct Dmar *dmar;
+struct Atable *dmar;
 static struct Slit *slit;		/* Sys locality info table used by scheduler */
 static struct Atable *mscttbl;		/* Maximum system characteristics table */
 static struct Reg *reg;			/* region used for I/O */
@@ -769,34 +769,27 @@ static struct Atable *parsemsct(struct Atable *parent,
 	return mscttbl;
 }
 
-static char *dmartype[] = {"DRHD", "RMRR", "ATSR", "RHSA", "ANDD", };
-
 /* TODO(rminnich): only handles on IOMMU for now. */
-static char *dumpdmar(char *start, char *end, struct Dmar *dt)
+static char *dumpdmar(char *start, char *end, struct Atable *dmar)
 {
+	struct Dmar *dt;
+
 	if (dmar == NULL)
 		return start;
 
-	start = seprintf(start, end, "acpi: DMAR@%p:\n", dt);
-	start = seprintf(start, end,
-			 "\tdmar: intr_remap %d haw %d entries %d\n",
-			 dmar->intr_remap, dmar->haw, dt->numentry);
-	for(int i = 0; i < dt->numentry; i++) {
-		struct Dtab *dtab = &dt->dtab[i];
-		int t = dtab->type;
-		start = seprintf(start, end, "\t%s: ", dmartype[t]);
-		// TODO: function pointers in an array? probably. */
-		switch(t) {
-		case DRHD:
-			start = seprintf(start, end, "%s 0x%02x 0x%016x\n",
-							 dtab->drhd.all & 1 ? "INCLUDE_PCI_ALL" : "Scoped",
-							 dtab->drhd.segment, dtab->drhd.base);
-			break;
-		default:
-			start = seprintf(start, end, "Unsupported: type %t\n", t);
-			break;
-		}
+	dt = dmar->tbl;
+	start = seprintf(start, end, "acpi: DMAR addr %p:\n", dt);
+	start = seprintf(start, end, "\tdmar: intr_remap %d haw %d\n",
+	                 dt->intr_remap, dt->haw);
+	for (int i = 0; i < dmar->nchildren; i++) {
+		struct Atable *at = dmar->children[i];
+		struct Drhd *drhd = at->tbl;
+		start = seprintf(start, end, "\tDRHD: ");
+		start = seprintf(start, end, "%s 0x%02x 0x%016x\n",
+		                 drhd->all & 1 ? "INCLUDE_PCI_ALL" : "Scoped",
+		                 drhd->segment, drhd->rba);
 	}
+
 	return start;
 }
 
@@ -1239,97 +1232,86 @@ static struct Atable *parsemadt(struct Atable *parent,
 	return apics;
 }
 
-/*
- * one function for each type of scope.
- */
-static void dscopes(uint8_t *p, struct Dtab *dtab, int tablen)
+static struct Atable *parsedmar(struct Atable *parent,
+                                char *name, uint8_t *raw, size_t rawsize)
 {
+	struct Atable *t, *tt;
 	int i;
-	int curoffset = 0;
-	dtab->drhd.nscope = 0;
-	printk("dscopes@%p, %d scopes: ", &p[curoffset], tablen - curoffset);
-	hexdump(&p[curoffset], tablen - curoffset);
-	for(i = curoffset; i < tablen; i += 4){
-		/* this is PAINFUL. We read the tbdf, look it up, read
-		 * the next scope, look that up w.r.t the one we have,
-		 * blah blah. Who designs this stuff? */
+	int baselen = rawsize > 38 ? 38 : rawsize;
+	int nentry, nscope, npath, off, dslen, dhlen, len, type, flags;
+	void *pathp;
+	char buf[16];
+	struct slice drhds;
+	struct Drhd *drhd;
+	struct Dmar *dt;
+
+	/* count the entries */
+	for (nentry = 0, off = 48; off < rawsize; nentry++) {
+		dslen = l16get(raw + off + 2);
+		printk("acpi DMAR: entry %d is addr %p (0x%x/0x%x)\n",
+		       nentry, raw + off, l16get(raw + off), dslen);
+		off = off + dslen;
 	}
+	printk("DMAR: %d entries\n", nentry);
 
-}
+	t = mkatable(parent, DMAR, name, raw, rawsize, sizeof(*dmar));
+	dt = t->tbl;
+	/* The table can be only partly filled. */
+	if (baselen >= 38 && raw[37] & 1)
+		dt->intr_remap = 1;
+	if (baselen >= 37)
+		dt->haw = raw[36] + 1;
 
-static int dtab(uint8_t *p, struct Dtab *dtab)
-{
-	int len;
-	dtab->type = l16get(p);
-	p += 2;
-	len = l16get(p);
-	p += 2;
-	switch(dtab->type) {
-	case DRHD:
-		dtab->drhd.all = p[0] & 1;
-		p++;
-		p++; /* reserved */
-		dtab->drhd.segment = l16get(p);
-		p += 2;
-		dtab->drhd.base = l64get(p);
-		p += 8;
-		/* NOTE: if all is set, there should be no scopes of type
+	/* Now we walk all the DMAR entries. */
+	slice_init(&drhds);
+	for (off = 48, i = 0; i < nentry; i++, off += dslen) {
+		snprintf(buf, sizeof(buf), "%d", i);
+		dslen = l16get(raw + off + 2);
+		type = l16get(raw + off);
+		if (type != 0)				// type == 0 => DRHD.
+			continue;
+		npath = 0;
+		nscope = 0;
+		for (int o = off + 16; o < (off + dslen); o += dhlen) {
+			nscope++;
+			dhlen = *(raw + o + 1);	// Single byte length.
+			npath += ((dhlen - 6) / 2);
+		}
+		tt = mkatable(dmar, DRHD, buf, raw + off, dslen,
+		              sizeof(struct Drhd) + 2 * npath +
+		              nscope * sizeof(struct DevScope));
+		flags = *(raw + off + 4);
+		drhd = tt->tbl;
+		drhd->all = flags & 1;
+		drhd->segment = l16get(raw + off + 6);
+		drhd->rba = l64get(raw + off + 8);
+		drhd->nscope = nscope;
+		drhd->scopes = (void *)drhd + sizeof(struct Drhd);
+		pathp = (void *)drhd +
+		    sizeof(struct Drhd) + nscope * sizeof(struct DevScope);
+		for (int i = 0, o = off + 16; i < nscope; i++) {
+			dhlen = *(raw + o + 1);
+			struct DevScope *ds = &drhd->scopes[i];
+			ds->enumeration_id = *(raw + o + 4);
+			ds->start_bus_number = *(raw + o + 5);
+			ds->npath = (dhlen - 6) / 2;
+			ds->paths = pathp;
+			for (int j = 0; j < ds->npath; j++)
+				ds->paths[j] = l16get(raw + o + 6 + 2*j);
+			pathp += 2*ds->npath;
+			o += dhlen;
+		}
+		/*
+		 * NOTE: if all is set, there should be no scopes of type
 		 * This being ACPI, where vendors randomly copy tables
 		 * from one system to another, and creating breakage,
 		 * anything is possible. But we'll warn them.
 		 */
-		dscopes(p, dtab, len);
-		break;
-	default:
-		break;
+		finatable_nochildren(tt);
+		slice_append(&drhds, tt);
 	}
 
-	/* N.B. We always skip over any unprocessed bits. */
-	return len;
-}
-
-static struct Atable *parsedmar(struct Atable *parent,
-                                char *name, uint8_t *raw, size_t rawsize)
-{
-	struct Atable *t;
-
-	t = mkatable(parent, DMAR, name, raw, rawsize, 0);
-
-	return finatable_nochildren(t);
-
-#if 0
-	int i;
-	int baselen = len > 38 ? 38 : len;
-	int nentry, off;
-
-	/* count the entries */
-	for (nentry = 0, off = 48; off < len; nentry++) {
-		int dslen = p[off+2]|(p[off+3]<<8);
-		printk("@%d it is %p 0x%x/0x%x\n",
-			   nentry, p, p[off]|(p[off+1]<<8), dslen);
-		off = off + dslen;
-	}
-	printk("DMAR: %d entries\n", nentry);
-	a->tbl = dmar = kzmalloc(sizeof(*dmar) + nentry * sizeof(dmar->dtab[0]), 1);
-	dmar->numentry = nentry;
-	/* the table can be only partly filled. Don't we all love ACPI?
-	 * No, we f@@@ing hate it.
-	 */
-	if (baselen >= 38 && p[37] &1 1) {
-		dmar->intr_remap = 1;
-	if (baselen >= 37)
-		dmar->haw = p[36] + 1;
-	/* now we get to walk all the 2 byte elements, ain't it
-	 * grand.
-	 */
-	for(off = 48, i = 0; i < nentry; i++) {
-		int dslen = p[2+off]|(p[off+3]<<8);
-		printk("@%d it is %p 0x%x/0x%x\n",
-			   i, &p[off], p[off]|(p[off+1]<<8), dslen);
-		dtab(&p[off], &dmar->dtab[i]);
-		off += dslen;
-	}
-#endif
+	return finatable(t, &drhds);
 }
 
 /*
@@ -2020,11 +2002,11 @@ static long acpiwrite(struct chan *c, void *a, long n, int64_t off)
 				fun = r->base >> Rpcifunshift & Rpcifunmask;
 				dev = r->base >> Rpcidevshift & Rpcidevmask;
 				bus = r->base >> Rpcibusshift & Rpcibusmask;
-				#ifdef CONFIG_X86
+#ifdef CONFIG_X86
 				r->tbdf = MKBUS(BusPCI, bus, dev, fun);
-				#else
+#else
 				r->tbdf = 0
-				#endif
+#endif
 				r->base = rno;	/* register ~ our base addr */
 			}
 			r->base = strtoul(cb->f[3], NULL, 0);

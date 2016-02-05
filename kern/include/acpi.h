@@ -125,21 +125,20 @@ enum {
 	FPDT,
 	GTDT,
 	HPET,
-	DMAR,
 	APIC,
+	DMAR,
+	/* DMAR types */
+	DRHD,
+	RMRR,
+	ATSR,
+	RHSA,
+	ANDD,
 	NACPITBLS,			/* Number of ACPI tables */
 
 	/* SRAT types */
 	SRlapic = 0,		/* Local apic/sapic affinity */
 	SRmem,				/* Memory affinity */
 	SRlx2apic,			/* x2 apic affinity */
-
-	/* DMAR types */
-	DRHD = 0,
-	RMRR,
-	ATSR,
-	RHSA,
-	ANDD,
 
 	/* Atable constants */
 	SIGSZ		= 4+1,	/* Size of the signature (including NUL) */
@@ -470,37 +469,35 @@ struct Xsdt {
 
 /* DMAR.
  */
-/* The device scope is basic tbdf as uint32_t. There is a special value that means
- * "everything" and if we see that we set "all" in the Drhd.
+/*
+ * Device scope.
  */
-struct DeviceScope {
-	uint32_t tbdf;
+struct DevScope {
+	int enumeration_id;
+	int start_bus_number;
+	int npath;
+	int *paths;
 };
-
-/* this is just hateful, and maybe there's a better way.
- * I can't think of anything that's not a total ugly clusterfuck.
+/*
+ * The device scope is basic tbdf as uint32_t. There is a special value
+ * that means "everything" and if we see that we set "all" in the Drhd.
  */
-struct Dtab {
-	int type;
-	union {
-		struct Drhd {
-			int nscope;
-			int segment;
-			uintptr_t base;
-			uintptr_t all; // this drhd scope is for everything.
-			struct DeviceScope scopes[];
-		}drhd;
-	};
+struct Drhd {
+	int flags;
+	int segment;
+	uintptr_t rba;
+	uintptr_t all;	// This drhd scope is for everything.
+	size_t nscope;
+	struct DevScope *scopes;
 };
 
 struct Dmar {
 	int haw;
-	/* no, sorry, if your stupid firmware disables x2apic
-	 * mode, you should not be here. We ignore that bit.
+	/*
+	 * If your firmware disables x2apic mode, you should not be here.
+	 * We ignore that bit.
 	 */
 	int intr_remap;
-	int numentry;
-	struct Dtab dtab[];
 };
 
 extern uintptr_t acpimblocksize(uintptr_t, int *);
